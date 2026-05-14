@@ -1,6 +1,7 @@
 import logging
 import os
 import time
+import asyncio
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes, CallbackQueryHandler
 from flask import Flask
@@ -18,71 +19,120 @@ def run_flask():
 # --- CONFIG ---
 logging.basicConfig(level=logging.INFO)
 TOKEN = os.getenv("BOT_TOKEN")
-CHANNEL_ID = os.getenv("CHANNEL_ID")
 MONETAG_LINK = os.getenv("MONETAG_DIRECT_LINK")
 
-# User clicking time store karne ke liye
-user_clicks = {}
+# Channels Mapping
+CHANNELS = {
+    "1": os.getenv("CH_1"),
+    "2": os.getenv("CH_2"),
+    "3": os.getenv("CH_3"),
+    "4": os.getenv("CH_4"),
+    "5": os.getenv("CH_5"),
+}
+
+# User state management
+user_data = {}
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if context.args:
-        file_id = context.args[0]
-        user_id = update.effective_user.id
-        
-        # User ko pehle ad dikhana hai, video nahi dena
-        keyboard = [
-            [InlineKeyboardButton("📺 Watch Ad (30 Sec)", url=MONETAG_LINK)],
-            [InlineKeyboardButton("✅ Verify & Get Video", callback_data=f"verify_{file_id}")]
-        ]
-        
-        # Click karne ka time note kar lo jab user /start par aaya
-        user_clicks[user_id] = time.time()
-        
-        await update.message.reply_text(
-            "⚠️ **Video Ready Hai!**\n\nLekin pehle aapko upar waale link par click karke **30 second** tak ad dekhna hoga.\nUske baad 'Verify' button par click karein.",
-            reply_markup=InlineKeyboardMarkup(keyboard),
-            parse_mode="Markdown"
-        )
+    args = context.args
+    user_id = update.effective_user.id
+    
+    if not args:
+        return await update.message.reply_text("👋 Welcome! Bot active hai.")
+
+    # Case 1: Single Video (/start 146 1)
+    if len(args) == 2:
+        file_id, ch_num = args
+        video_list = [int(file_id)]
+        target_ch = CHANNELS.get(ch_num)
+        batch_size = 1
+    
+    # Case 2: Bulk Videos (/start 146 150 2 2)
+    elif len(args) == 4:
+        start_id, end_id, ch_num, batch_size = map(int, args)
+        video_list = list(range(start_id, end_id + 1))
+        target_ch = CHANNELS.get(str(ch_num))
+        batch_size = int(batch_size)
+    
     else:
-        await update.message.reply_text("👋 Welcome! Daily surprise videos ke liye description check karein.")
+        return await update.message.reply_text("❌ Invalid URL Format.")
+
+    if not target_ch:
+        return await update.message.reply_text("❌ Channel ID nahi mili.")
+
+    # Store state
+    user_data[user_id] = {
+        "videos": video_list,
+        "channel": target_ch,
+        "batch_size": batch_size,
+        "current_index": 0,
+        "click_time": 0
+    }
+
+    await send_ad_step(update, user_id)
+
+async def send_ad_step(update, user_id):
+    user_data[user_id]['click_time'] = time.time()
+    
+    keyboard = [
+        [InlineKeyboardButton("📺 Watch Ad to Unlock Videos", url=MONETAG_LINK)],
+        [InlineKeyboardButton("✅ Verify & Get Videos", callback_data="verify_batch")]
+    ]
+    
+    msg_text = "⚠️ **Verification Required!**\n\nAglo videos ke liye 30 second ad dekhein aur Verify par click karein."
+    
+    if update.message:
+        await update.message.reply_text(msg_text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
+    else:
+        await update.callback_query.message.reply_text(msg_text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
 
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     user_id = query.from_user.id
-    data = query.data
+    
+    if user_id not in user_data:
+        return await query.answer("❌ Session expired. Start again.", show_alert=True)
 
-    if data.startswith("verify_"):
-        file_id = data.split("_")[1]
-        start_time = user_clicks.get(user_id, 0)
-        current_time = time.time()
+    if query.data == "verify_batch":
+        gap = time.time() - user_data[user_id]['click_time']
         
-        # Time gap calculate karein
-        gap = current_time - start_time
-
         if gap < 30:
-            remaining = int(30 - gap)
-            await query.answer(f"❌ Abhi {remaining} second baaki hain! Ad poora dekhein.", show_alert=True)
-        else:
-            await query.answer("✅ Verification Successful!")
-            await query.message.delete() # Purana message hata do
-            
-            # Ab video deliver karo
+            return await query.answer(f"❌ {int(30 - gap)}s baaki hain!", show_alert=True)
+        
+        await query.answer("✅ Verified!")
+        await query.message.delete()
+        
+        # Process Batch
+        data = user_data[user_id]
+        start_idx = data['current_index']
+        end_idx = start_idx + data['batch_size']
+        current_batch = data['videos'][start_idx:end_idx]
+        
+        for msg_id in current_batch:
             try:
                 await context.bot.copy_message(
                     chat_id=query.message.chat_id,
-                    from_chat_id=int(CHANNEL_ID),
-                    message_id=int(file_id),
-                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Next Video Ad", url=MONETAG_LINK)]])
+                    from_chat_id=data['channel'],
+                    message_id=msg_id
                 )
-            except Exception as e:
-                await context.bot.send_message(chat_id=query.message.chat_id, text="❌ Error: File nahi mil saki.")
+                await asyncio.sleep(0.5) # Flood protection
+            except Exception:
+                await context.bot.send_message(chat_id=query.message.chat_id, text=f"❌ Video {msg_id} nahi mila.")
+
+        # Update index
+        user_data[user_id]['current_index'] = end_idx
+        
+        # Check if more videos left
+        if end_idx < len(data['videos']):
+            await send_ad_step(update, user_id)
+        else:
+            await context.bot.send_message(chat_id=query.message.chat_id, text="✅ **Saare videos complete ho gaye!**")
+            del user_data[user_id]
 
 if __name__ == '__main__':
     Thread(target=run_flask).start()
-    
     app = ApplicationBuilder().token(TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(button_callback))
-    
-    print("🚀 Verification Bot Live...")
+    print("🚀 Advanced Multi-Channel Bot Live...")
     app.run_polling()

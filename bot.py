@@ -21,7 +21,6 @@ logging.basicConfig(level=logging.INFO)
 TOKEN = os.getenv("BOT_TOKEN")
 MONETAG_LINK = os.getenv("MONETAG_DIRECT_LINK")
 
-# Channels Mapping
 CHANNELS = {
     "1": os.getenv("CH_1"),
     "2": os.getenv("CH_2"),
@@ -30,7 +29,6 @@ CHANNELS = {
     "5": os.getenv("CH_5"),
 }
 
-# User state management
 user_data = {}
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -40,27 +38,32 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not args:
         return await update.message.reply_text("👋 Welcome! Bot active hai.")
 
-    # Case 1: Single Video (/start 146 1)
-    if len(args) == 2:
-        file_id, ch_num = args
-        video_list = [int(file_id)]
-        target_ch = CHANNELS.get(ch_num)
-        batch_size = 1
+    extracted_args = args[0].split('_') if len(args) == 1 and "_" in args[0] else args
+
+    if len(extracted_args) == 2:
+        try:
+            file_id, ch_num = extracted_args
+            video_list = [int(file_id)]
+            target_ch = CHANNELS.get(str(ch_num))
+            batch_size = 1
+        except ValueError:
+            return await update.message.reply_text("❌ Invalid Format.")
     
-    # Case 2: Bulk Videos (/start 146 150 2 2)
-    elif len(args) == 4:
-        start_id, end_id, ch_num, batch_size = map(int, args)
-        video_list = list(range(start_id, end_id + 1))
-        target_ch = CHANNELS.get(str(ch_num))
-        batch_size = int(batch_size)
+    elif len(extracted_args) == 4:
+        try:
+            start_id, end_id, ch_num, b_size = map(int, extracted_args)
+            video_list = list(range(start_id, end_id + 1))
+            target_ch = CHANNELS.get(str(ch_num))
+            batch_size = b_size
+        except ValueError:
+            return await update.message.reply_text("❌ Invalid Numbers.")
     
     else:
-        return await update.message.reply_text("❌ Invalid URL Format.")
+        return await update.message.reply_text("❌ Invalid URL.")
 
     if not target_ch:
-        return await update.message.reply_text("❌ Channel ID nahi mili.")
+        return await update.message.reply_text(f"❌ Channel ID set nahi hai.")
 
-    # Store state
     user_data[user_id] = {
         "videos": video_list,
         "channel": target_ch,
@@ -69,17 +72,22 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "click_time": 0
     }
 
-    await send_ad_step(update, user_id)
+    # Pehli baar normal message
+    await send_ad_step(update, user_id, is_next_part=False)
 
-async def send_ad_step(update, user_id):
+async def send_ad_step(update, user_id, is_next_part=False):
     user_data[user_id]['click_time'] = time.time()
     
     keyboard = [
-        [InlineKeyboardButton("📺 Watch Ad to Unlock Videos", url=MONETAG_LINK)],
+        [InlineKeyboardButton("📺 Watch Ad (30 Sec)", url=MONETAG_LINK)],
         [InlineKeyboardButton("✅ Verify & Get Videos", callback_data="verify_batch")]
     ]
     
-    msg_text = "⚠️ **Verification Required!**\n\nAglo videos ke liye 30 second ad dekhein aur Verify par click karein."
+    # Yaha change kiya hai: Agar agla part hai to alag message dikhega
+    if is_next_part:
+        msg_text = "✨ **Agla Part Taiyar Hai!🫦💦🍌👙**\n\n**Isi series ka aur video ka liya verify kara.🫦👙👠💦🍌👅💦👠👙🫦**\n30 second ad dekhein aur niche button par click karein."
+    else:
+        msg_text = "⚠️ **Verification Required!**\n\nVideos unlock karne ke liye 30 second ad dekhein aur niche button par click karein."
     
     if update.message:
         await update.message.reply_text(msg_text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
@@ -91,7 +99,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = query.from_user.id
     
     if user_id not in user_data:
-        return await query.answer("❌ Session expired. Start again.", show_alert=True)
+        return await query.answer("❌ Session expired.", show_alert=True)
 
     if query.data == "verify_batch":
         gap = time.time() - user_data[user_id]['click_time']
@@ -102,7 +110,6 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.answer("✅ Verified!")
         await query.message.delete()
         
-        # Process Batch
         data = user_data[user_id]
         start_idx = data['current_index']
         end_idx = start_idx + data['batch_size']
@@ -115,24 +122,22 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     from_chat_id=data['channel'],
                     message_id=msg_id
                 )
-                await asyncio.sleep(0.5) # Flood protection
+                await asyncio.sleep(0.5)
             except Exception:
-                await context.bot.send_message(chat_id=query.message.chat_id, text=f"❌ Video {msg_id} nahi mila.")
+                await context.bot.send_message(chat_id=query.message.chat_id, text=f"❌ Error: Video {msg_id} nahi mila.")
 
-        # Update index
         user_data[user_id]['current_index'] = end_idx
         
-        # Check if more videos left
         if end_idx < len(data['videos']):
-            await send_ad_step(update, user_id)
+            # Yaha next part ke liye true pass kar rahe hain
+            await send_ad_step(update, user_id, is_next_part=True)
         else:
-            await context.bot.send_message(chat_id=query.message.chat_id, text="✅ **Saare videos complete ho gaye!**")
-            del user_data[user_id]
+            await context.bot.send_message(chat_id=query.message.chat_id, text="🎉 **Sari videos complete ho gayi hain!**")
+            if user_id in user_data: del user_data[user_id]
 
 if __name__ == '__main__':
     Thread(target=run_flask).start()
     app = ApplicationBuilder().token(TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(button_callback))
-    print("🚀 Advanced Multi-Channel Bot Live...")
     app.run_polling()

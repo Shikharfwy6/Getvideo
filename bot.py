@@ -2,6 +2,7 @@ import logging
 import os
 import time
 import asyncio
+import math
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes, CallbackQueryHandler
 from flask import Flask
@@ -40,6 +41,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     extracted_args = args[0].split('_') if len(args) == 1 and "_" in args[0] else args
 
+    # Case 1: Single Video -> /start 146_1
     if len(extracted_args) == 2:
         try:
             file_id, ch_num = extracted_args
@@ -49,12 +51,22 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except ValueError:
             return await update.message.reply_text("❌ Invalid Format.")
     
+    # Case 2: Bulk Videos -> /start 107_240_3_4
     elif len(extracted_args) == 4:
         try:
-            start_id, end_id, ch_num, b_size = map(int, extracted_args)
+            start_id, end_id, ch_num, total_parts = map(int, extracted_args)
             video_list = list(range(start_id, end_id + 1))
             target_ch = CHANNELS.get(str(ch_num))
-            batch_size = b_size
+            
+            total_videos = len(video_list)
+            
+            # --- AUTO CALCULATION LOGIC ---
+            # Total parts me divide karne ke liye ek part me kitne video dene honge
+            if total_parts <= 0:
+                total_parts = 1
+            batch_size = math.ceil(total_videos / total_parts)
+            # ------------------------------
+            
         except ValueError:
             return await update.message.reply_text("❌ Invalid Numbers.")
     
@@ -83,9 +95,8 @@ async def send_ad_step(update, user_id, is_next_part=False):
         [InlineKeyboardButton("✅ Verify & Get Videos", callback_data="verify_batch")]
     ]
     
-    # Yaha change kiya hai: Agar agla part hai to alag message dikhega
     if is_next_part:
-        msg_text = "✨ **Agla Part Taiyar Hai!🫦💦🍌👙**\n\n**Isi series ka aur video ka liya verify kara.🫦👙👠💦🍌👅💦👠👙🫦**\n30 second ad dekhein aur niche button par click karein."
+        msg_text = "✨ अगला पार्ट तैयार है!**\n\n**इसी सीरीज़ के और वीडियो के लिए वेरिफाई करें।**\n30 सेकंड का विज्ञापन देखें और नीचे दिए गए बटन पर क्लिक करें।."
     else:
         msg_text = "⚠️ **Verification Required!**\n\nVideos unlock karne ke liye 30 second ad dekhein aur niche button par click karein."
     
@@ -129,7 +140,6 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_data[user_id]['current_index'] = end_idx
         
         if end_idx < len(data['videos']):
-            # Yaha next part ke liye true pass kar rahe hain
             await send_ad_step(update, user_id, is_next_part=True)
         else:
             await context.bot.send_message(chat_id=query.message.chat_id, text="🎉 **Sari videos complete ho gayi hain!**")

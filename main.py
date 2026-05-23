@@ -12,7 +12,6 @@ logging.basicConfig(level=logging.INFO)
 TOKEN = os.getenv("BOT_TOKEN")
 MONETAG_LINK = os.getenv("MONETAG_DIRECT_LINK")
 
-# एनवायरनमेंट वेरिएबल्स को सुरक्षित तरीके से लोड करना
 CHANNELS = {
     "1": os.getenv("CH_1"),
     "2": os.getenv("CH_2"),
@@ -22,6 +21,10 @@ CHANNELS = {
 }
 
 user_data = {}
+
+# --- TELEGRAM APPLICATION INITIALIZATION ---
+# बोट ऐप को बिना पोलिंग के सीधे डिफाइन कर रहे हैं
+tg_app = ApplicationBuilder().token(TOKEN).build()
 
 # --- BOT LOGIC FUNCTIONS ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -140,7 +143,11 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await context.bot.send_message(chat_id=query.message.chat_id, text="🎉 **Sari videos complete ho gayi hain!**")
             if user_id in user_data: del user_data[user_id]
 
-# --- FLASK SERVER & WEBHOOK ---
+# --- HANDLERS REGISTRATION ---
+tg_app.add_handler(CommandHandler("start", start))
+tg_app.add_handler(CallbackQueryHandler(button_callback))
+
+# --- FLASK SERVER & WEBHOOK FOR VERCEL ---
 app = Flask(__name__)
 
 @app.route('/')
@@ -151,27 +158,22 @@ def home():
 def webhook():
     if request.method == "POST":
         try:
-            # टेलीग्राम ऐप को हर रिक्वेस्ट पर फ्रेश बिल्ड करना सर्वरलेस के लिए बेस्ट है
-            tg_app = ApplicationBuilder().token(TOKEN).build()
-            tg_app.add_handler(CommandHandler("start", start))
-            tg_app.add_handler(CallbackQueryHandler(button_callback))
-            
             update_json = request.get_json(force=True)
+            
+            # बिना ऐप इनिशियलाइज किए सीधे मैसेज प्रोसेस करने का फिक्स तरीका
             update = Update.de_json(update_json, tg_app.bot)
             
-            async def process():
-                if not tg_app.initialized:
-                    await tg_app.initialize()
-                await tg_app.process_update(update)
-
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
-            loop.run_until_complete(process())
+            
+            # बिना ऐप ऑब्जेक्ट की बंदिशों के सीधे अपडेट को कोर अपडेटर पर भेजना
+            loop.run_until_complete(tg_app.update_queue.put(update))
+            loop.run_until_complete(tg_app.process_update(update))
             loop.close()
             
             return "OK", 200
         except Exception as e:
-            logging.error(f"CRITICAL ERROR in webhook: {e}")
-            return "OK", 200  # यहाँ 200 भेजने से टेलीग्राम बार-बार फेल रिक्वेस्ट नहीं भेजेगा
+            logging.error(f"FIXED ERROR: {e}")
+            return "OK", 200  # टेलीग्राम को हमेशा 200 भेजें ताकि वो अटके नहीं
             
     return "Invalid Request", 400

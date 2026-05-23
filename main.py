@@ -12,6 +12,7 @@ logging.basicConfig(level=logging.INFO)
 TOKEN = os.getenv("BOT_TOKEN")
 MONETAG_LINK = os.getenv("MONETAG_DIRECT_LINK")
 
+# एनवायरनमेंट वेरिएबल्स को सुरक्षित तरीके से लोड करना
 CHANNELS = {
     "1": os.getenv("CH_1"),
     "2": os.getenv("CH_2"),
@@ -22,12 +23,10 @@ CHANNELS = {
 
 user_data = {}
 
-# --- TELEGRAM APPLICATION INITIALIZATION ---
-# Vercel के लिए टेलीग्राम ऐप को ग्लोबल लेवल पर बिल्ड कर रहे हैं
-tg_app = ApplicationBuilder().token(TOKEN).build()
-
 # --- BOT LOGIC FUNCTIONS ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.message:
+        return
     args = context.args
     user_id = update.effective_user.id
     
@@ -75,10 +74,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await send_ad_step(update, user_id, is_next_part=False)
 
 async def send_ad_step(update, user_id, is_next_part=False):
+    if user_id not in user_data:
+        return
     user_data[user_id]['click_time'] = time.time()
     
     keyboard = [
-        [InlineKeyboardButton("📺 Watch Ad (30 Sec)", url=MONETAG_LINK)],
+        [InlineKeyboardButton("📺 Watch Ad (30 Sec)", url=MONETAG_LINK or "https://google.com")],
         [InlineKeyboardButton("✅ Verify & Get Videos", callback_data="verify_batch")]
     ]
     
@@ -87,10 +88,13 @@ async def send_ad_step(update, user_id, is_next_part=False):
     else:
         msg_text = "⚠️ **Verification Required!**\n\nVideos unlock karne ke liye 30 second ad dekhein aur niche button par click karein."
     
-    if update.message:
-        await update.message.reply_text(msg_text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
-    else:
-        await update.callback_query.message.reply_text(msg_text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
+    try:
+        if update.message:
+            await update.message.reply_text(msg_text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
+        else:
+            await update.callback_query.message.reply_text(msg_text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
+    except Exception as e:
+        logging.error(f"Error sending message: {e}")
 
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -106,7 +110,10 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return await query.answer(f"❌ {int(30 - gap)}s baaki hain!", show_alert=True)
         
         await query.answer("✅ Verified!")
-        await query.message.delete()
+        try:
+            await query.message.delete()
+        except Exception:
+            pass
         
         data = user_data[user_id]
         start_idx = data['current_index']
@@ -121,7 +128,8 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     message_id=msg_id
                 )
                 await asyncio.sleep(0.5)
-            except Exception:
+            except Exception as e:
+                logging.error(f"Copy message failed: {e}")
                 await context.bot.send_message(chat_id=query.message.chat_id, text=f"❌ Error: Video {msg_id} nahi mila.")
 
         user_data[user_id]['current_index'] = end_idx
@@ -132,12 +140,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await context.bot.send_message(chat_id=query.message.chat_id, text="🎉 **Sari videos complete ho gayi hain!**")
             if user_id in user_data: del user_data[user_id]
 
-# --- HANDLERS REGISTRATION ---
-tg_app.add_handler(CommandHandler("start", start))
-tg_app.add_handler(CallbackQueryHandler(button_callback))
-
-# --- FLASK SERVER & WEBHOOK FOR VERCEL ---
-# Vercel इसी 'app' ऑब्जेक्ट को ढूंढकर रन करता है
+# --- FLASK SERVER & WEBHOOK ---
 app = Flask(__name__)
 
 @app.route('/')
@@ -148,6 +151,11 @@ def home():
 def webhook():
     if request.method == "POST":
         try:
+            # टेलीग्राम ऐप को हर रिक्वेस्ट पर फ्रेश बिल्ड करना सर्वरलेस के लिए बेस्ट है
+            tg_app = ApplicationBuilder().token(TOKEN).build()
+            tg_app.add_handler(CommandHandler("start", start))
+            tg_app.add_handler(CallbackQueryHandler(button_callback))
+            
             update_json = request.get_json(force=True)
             update = Update.de_json(update_json, tg_app.bot)
             
@@ -163,7 +171,7 @@ def webhook():
             
             return "OK", 200
         except Exception as e:
-            logging.error(f"Error in webhook: {e}")
-            return "Error", 500
+            logging.error(f"CRITICAL ERROR in webhook: {e}")
+            return "OK", 200  # यहाँ 200 भेजने से टेलीग्राम बार-बार फेल रिक्वेस्ट नहीं भेजेगा
             
     return "Invalid Request", 400

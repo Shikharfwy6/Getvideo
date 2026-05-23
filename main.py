@@ -4,7 +4,7 @@ import time
 import asyncio
 import math
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import CommandHandler, CallbackQueryHandler, CallbackContext, ExtBot
+from telegram.ext import CallbackContext, ExtBot
 from flask import Flask, request
 
 # --- CONFIG & LOGGING ---
@@ -23,21 +23,23 @@ CHANNELS = {
 user_data = {}
 
 # --- BOT LOGIC FUNCTIONS ---
-async def start(update: Update, context: CallbackContext):
+async def start_with_text(update: Update, bot: ExtBot, text_message: str):
     if not update.message:
         return
     
-    args = context.args
     user_id = update.effective_user.id
+    parts = text_message.split()
     
     # अगर कोई आर्गुमेंट नहीं है (सिर्फ सीधा /start भेजा है)
-    if not args or len(args) == 0:
-        return await update.message.reply_text("👋 Welcome! Bot active hai.")
+    if len(parts) <= 1:
+        await bot.send_message(chat_id=update.message.chat_id, text="👋 Welcome! Bot active hai.")
+        return
 
-    # टेलीग्राम से आए पहले आर्गुमेंट को तोड़ना (जैसे: 249_251_2_1)
-    extracted_args = args[0].split('_') if "_" in args[0] else args
+    # /start के आगे का हिस्सा निकालना (जैसे: 249_251_2_1)
+    raw_arg = parts[1]
+    extracted_args = raw_arg.split('_') if "_" in raw_arg else [raw_arg]
 
-    # Case 1: Single Video -> /start 146_1
+    # Case 1: Single Video -> 146_1
     if len(extracted_args) == 2:
         try:
             file_id, ch_num = extracted_args
@@ -45,9 +47,10 @@ async def start(update: Update, context: CallbackContext):
             target_ch = CHANNELS.get(str(ch_num))
             batch_size = 1
         except ValueError:
-            return await update.message.reply_text("❌ Invalid Format.")
+            await bot.send_message(chat_id=update.message.chat_id, text="❌ Invalid Format.")
+            return
     
-    # Case 2: Bulk Videos -> /start 107_240_3_4
+    # Case 2: Bulk Videos -> 107_240_3_4
     elif len(extracted_args) == 4:
         try:
             start_id, end_id, ch_num, total_parts = map(int, extracted_args)
@@ -55,19 +58,20 @@ async def start(update: Update, context: CallbackContext):
             target_ch = CHANNELS.get(str(ch_num))
             
             total_videos = len(video_list)
-            
-            # --- आपका ऑटो कैलकुलेशन लॉजिक ---
             if total_parts <= 0:
                 total_parts = 1
             batch_size = math.ceil(total_videos / total_parts)
             
         except ValueError:
-            return await update.message.reply_text("❌ Invalid Numbers.")
+            await bot.send_message(chat_id=update.message.chat_id, text="❌ Invalid Numbers.")
+            return
     else:
-        return await update.message.reply_text("❌ Invalid URL Parameters.")
+        await bot.send_message(chat_id=update.message.chat_id, text="❌ Invalid URL Parameters.")
+        return
 
     if not target_ch:
-        return await update.message.reply_text(f"❌ Channel ID set nahi hai.")
+        await bot.send_message(chat_id=update.message.chat_id, text="❌ Channel ID set nahi hai.")
+        return
 
     # यूज़र का डेटा सेशन सेव करना
     user_data[user_id] = {
@@ -79,10 +83,10 @@ async def start(update: Update, context: CallbackContext):
     }
 
     # विज्ञापन वाला बटन भेजना
-    await send_ad_step(update, user_id, is_next_part=False)
+    await send_ad_step_fixed(update, bot, user_id, is_next_part=False)
 
 
-async def send_ad_step(update, user_id, is_next_part=False):
+async def send_ad_step_fixed(update, bot: ExtBot, user_id, is_next_part=False):
     if user_id not in user_data:
         return
     user_data[user_id]['click_time'] = time.time()
@@ -98,30 +102,36 @@ async def send_ad_step(update, user_id, is_next_part=False):
         msg_text = "⚠️ **Verification Required!**\n\nVideos unlock karne ke liye 30 second ad dekhein aur niche button par click karein."
     
     try:
-        if update.message:
-            await update.message.reply_text(msg_text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
-        else:
-            await update.callback_query.message.reply_text(msg_text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
+        chat_id = update.message.chat_id if update.message else update.callback_query.message.chat_id
+        await bot.send_message(chat_id=chat_id, text=msg_text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
     except Exception as e:
         logging.error(f"Error sending ad message: {e}")
 
 
-async def button_callback(update: Update, context: CallbackContext):
+async def button_callback_fixed(update: Update, bot: ExtBot):
     query = update.callback_query
     user_id = query.from_user.id
     
     if user_id not in user_data:
-        return await query.answer("❌ Session expired.", show_alert=True)
+        try:
+            await bot.answer_callback_query(callback_query_id=query.id, text="❌ Session expired.", show_alert=True)
+        except Exception:
+            pass
+        return
 
     if query.data == "verify_batch":
         gap = time.time() - user_data[user_id]['click_time']
         
         if gap < 30:
-            return await query.answer(f"❌ {int(30 - gap)}s baaki hain!", show_alert=True)
+            try:
+                await bot.answer_callback_query(callback_query_id=query.id, text=f"❌ {int(30 - gap)}s baaki hain!", show_alert=True)
+            except Exception:
+                pass
+            return
         
-        await query.answer("✅ Verified!")
         try:
-            await query.message.delete()
+            await bot.answer_callback_query(callback_query_id=query.id, text="✅ Verified!")
+            await bot.delete_message(chat_id=query.message.chat_id, message_id=query.message.message_id)
         except Exception:
             pass
         
@@ -132,7 +142,7 @@ async def button_callback(update: Update, context: CallbackContext):
         
         for msg_id in current_batch:
             try:
-                await context.bot.copy_message(
+                await bot.copy_message(
                     chat_id=query.message.chat_id,
                     from_chat_id=data['channel'],
                     message_id=msg_id
@@ -140,14 +150,14 @@ async def button_callback(update: Update, context: CallbackContext):
                 await asyncio.sleep(0.5)
             except Exception as e:
                 logging.error(f"Error copying video {msg_id}: {e}")
-                await context.bot.send_message(chat_id=query.message.chat_id, text=f"❌ Error: Video {msg_id} nahi mila.")
+                await bot.send_message(chat_id=query.message.chat_id, text=f"❌ Error: Video {msg_id} nahi mila.")
 
         user_data[user_id]['current_index'] = end_idx
         
         if end_idx < len(data['videos']):
-            await send_ad_step(update, user_id, is_next_part=True)
+            await send_ad_step_fixed(update, bot, user_id, is_next_part=True)
         else:
-            await context.bot.send_message(chat_id=query.message.chat_id, text="🎉 **Sari videos complete ho gayi hain!**")
+            await bot.send_message(chat_id=query.message.chat_id, text="🎉 **Sari videos complete ho gayi hain!**")
             if user_id in user_data: 
                 del user_data[user_id]
 
@@ -166,19 +176,15 @@ def webhook():
             update_json = request.get_json(force=True)
             bot = ExtBot(token=TOKEN)
             update = Update.de_json(update_json, bot)
-            context = CallbackContext.from_update(update, bot)
             
             if update.message and update.message.text:
                 text = update.message.text
                 if text.startswith('/start'):
-                    # यहाँ हमने टेलीग्राम लिंक पैरामीटर्स (args) को मैन्युअल रूप से एकदम सही निकाला है
-                    parts = text.split()
-                    context._args = [parts[1]] if len(parts) > 1 else []
-                    
-                    asyncio.run(start(update, context))
+                    # सीधे मैसेज का टेक्स्ट ही पास कर रहे हैं ताकि लाइब्रेरी पर निर्भरता खत्म हो जाए
+                    asyncio.run(start_with_text(update, bot, text))
                     
             elif update.callback_query:
-                asyncio.run(button_callback(update, context))
+                asyncio.run(button_callback_fixed(update, bot))
                 
             return "OK", 200
         except Exception as e:

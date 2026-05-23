@@ -5,7 +5,7 @@ import asyncio
 import math
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes, CallbackQueryHandler
-from flask import Flask, request, jsonify
+from flask import Flask, request
 
 # --- CONFIG & LOGGING ---
 logging.basicConfig(level=logging.INFO)
@@ -83,7 +83,7 @@ async def send_ad_step(update, user_id, is_next_part=False):
     ]
     
     if is_next_part:
-        msg_text = "✨ अगला पार्ट तैयार है!**\n\n**इसी सीरीज़ के और वीडियो के लिए वेरिफाई करें।**\n30 सेकंड का विज्ञापन देखें और नीचे दिए गए बटन पर क्लिक करें।."
+        msg_text = "✨ अगला पार्ट तैयार है!\n\nइसी सीरीज़ के और वीडियो के लिए वेरिफाई करें।\n30 सेकंड का विज्ञापन देखें और नीचे दिए गए बटन पर क्लिक करें।"
     else:
         msg_text = "⚠️ **Verification Required!**\n\nVideos unlock karne ke liye 30 second ad dekhein aur niche button par click karein."
     
@@ -135,7 +135,9 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # --- HANDLERS REGISTRATION ---
 tg_app.add_handler(CommandHandler("start", start))
 tg_app.add_handler(CallbackQueryHandler(button_callback))
+
 # --- FLASK SERVER & WEBHOOK FOR VERCEL ---
+# Vercel इसी 'app' ऑब्जेक्ट को ढूंढकर रन करता है
 app = Flask(__name__)
 
 @app.route('/')
@@ -149,12 +151,9 @@ def webhook():
             update_json = request.get_json(force=True)
             update = Update.de_json(update_json, tg_app.bot)
             
-            # Vercel के Serverless environment के लिए सही तरीका
             async def process():
-                # 1. पहले चेक करें कि ऐप इनिशियलाइज़ है या नहीं, अगर नहीं तो करें
                 if not tg_app.initialized:
                     await tg_app.initialize()
-                # 2. मैसेज को प्रोसेस करें
                 await tg_app.process_update(update)
 
             loop = asyncio.new_event_loop()
@@ -168,8 +167,3 @@ def webhook():
             return "Error", 500
             
     return "Invalid Request", 400
-
-if __name__ == '__main__':
-    port = int(os.environ.get("PORT", 8000))
-    app.run(host='0.0.0.0', port=port)
-    

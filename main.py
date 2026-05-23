@@ -34,10 +34,10 @@ async def start(update: Update, context: CallbackContext):
     if not args or len(args) == 0:
         return await update.message.reply_text("👋 Welcome! Bot active hai.")
 
-    # आर्गुमेंट्स को ठीक से निकालना
+    # टेलीग्राम से आए पहले आर्गुमेंट को तोड़ना (जैसे: 249_251_2_1)
     extracted_args = args[0].split('_') if "_" in args[0] else args
 
-    # Case 1: Single Video -> 249_1
+    # Case 1: Single Video -> /start 146_1
     if len(extracted_args) == 2:
         try:
             file_id, ch_num = extracted_args
@@ -47,7 +47,7 @@ async def start(update: Update, context: CallbackContext):
         except ValueError:
             return await update.message.reply_text("❌ Invalid Format.")
     
-    # Case 2: Bulk Videos -> 249_251_2_1
+    # Case 2: Bulk Videos -> /start 107_240_3_4
     elif len(extracted_args) == 4:
         try:
             start_id, end_id, ch_num, total_parts = map(int, extracted_args)
@@ -55,6 +55,8 @@ async def start(update: Update, context: CallbackContext):
             target_ch = CHANNELS.get(str(ch_num))
             
             total_videos = len(video_list)
+            
+            # --- आपका ऑटो कैलकुलेशन लॉजिक ---
             if total_parts <= 0:
                 total_parts = 1
             batch_size = math.ceil(total_videos / total_parts)
@@ -62,12 +64,12 @@ async def start(update: Update, context: CallbackContext):
         except ValueError:
             return await update.message.reply_text("❌ Invalid Numbers.")
     else:
-        return await update.message.reply_text("❌ Invalid URL parameters.")
+        return await update.message.reply_text("❌ Invalid URL Parameters.")
 
     if not target_ch:
         return await update.message.reply_text(f"❌ Channel ID set nahi hai.")
 
-    # डेटा सेव करना
+    # यूज़र का डेटा सेशन सेव करना
     user_data[user_id] = {
         "videos": video_list,
         "channel": target_ch,
@@ -76,8 +78,9 @@ async def start(update: Update, context: CallbackContext):
         "click_time": 0
     }
 
-    # एडवर्टाइजमेंट स्टेप पर भेजें
+    # विज्ञापन वाला बटन भेजना
     await send_ad_step(update, user_id, is_next_part=False)
+
 
 async def send_ad_step(update, user_id, is_next_part=False):
     if user_id not in user_data:
@@ -100,7 +103,8 @@ async def send_ad_step(update, user_id, is_next_part=False):
         else:
             await update.callback_query.message.reply_text(msg_text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
     except Exception as e:
-        logging.error(f"Error sending message: {e}")
+        logging.error(f"Error sending ad message: {e}")
+
 
 async def button_callback(update: Update, context: CallbackContext):
     query = update.callback_query
@@ -135,7 +139,7 @@ async def button_callback(update: Update, context: CallbackContext):
                 )
                 await asyncio.sleep(0.5)
             except Exception as e:
-                logging.error(f"Copy message failed: {e}")
+                logging.error(f"Error copying video {msg_id}: {e}")
                 await context.bot.send_message(chat_id=query.message.chat_id, text=f"❌ Error: Video {msg_id} nahi mila.")
 
         user_data[user_id]['current_index'] = end_idx
@@ -144,9 +148,11 @@ async def button_callback(update: Update, context: CallbackContext):
             await send_ad_step(update, user_id, is_next_part=True)
         else:
             await context.bot.send_message(chat_id=query.message.chat_id, text="🎉 **Sari videos complete ho gayi hain!**")
-            if user_id in user_data: del user_data[user_id]
+            if user_id in user_data: 
+                del user_data[user_id]
 
-# --- FLASK SERVER & WEBHOOK ---
+
+# --- FLASK SERVER & WEBHOOK FOR VERCEL ---
 app = Flask(__name__)
 
 @app.route('/')
@@ -165,13 +171,10 @@ def webhook():
             if update.message and update.message.text:
                 text = update.message.text
                 if text.startswith('/start'):
-                    # मजबूत और फुल-प्रूफ स्ट्रिंग स्प्लिट लॉजिक
+                    # यहाँ हमने टेलीग्राम लिंक पैरामीटर्स (args) को मैन्युअल रूप से एकदम सही निकाला है
                     parts = text.split()
-                    if len(parts) > 1:
-                        context._args = [parts[1]]  # यह आपके '249_251_2_1' को एकदम सही पकड़ेगा
-                    else:
-                        context._args = []
-                        
+                    context._args = [parts[1]] if len(parts) > 1 else []
+                    
                     asyncio.run(start(update, context))
                     
             elif update.callback_query:
@@ -179,7 +182,7 @@ def webhook():
                 
             return "OK", 200
         except Exception as e:
-            logging.error(f"Error in execution: {e}")
+            logging.error(f"Webhook Execution Error: {e}")
             return "OK", 200
             
     return "Invalid Request", 400

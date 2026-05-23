@@ -5,19 +5,9 @@ import asyncio
 import math
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes, CallbackQueryHandler
-from flask import Flask
-from threading import Thread
+from flask import Flask, request, jsonify
 
-# --- FLASK SERVER ---
-app_flask = Flask('')
-@app_flask.route('/')
-def home(): return "Bot is Active!"
-
-def run_flask():
-    port = int(os.environ.get("PORT", 10000))
-    app_flask.run(host='0.0.0.0', port=port)
-
-# --- CONFIG ---
+# --- CONFIG & LOGGING ---
 logging.basicConfig(level=logging.INFO)
 TOKEN = os.getenv("BOT_TOKEN")
 MONETAG_LINK = os.getenv("MONETAG_DIRECT_LINK")
@@ -32,6 +22,11 @@ CHANNELS = {
 
 user_data = {}
 
+# --- TELEGRAM APPLICATION INITIALIZATION ---
+# Vercel के लिए टेलीग्राम ऐप को ग्लोबल लेवल पर बिल्ड कर रहे हैं
+tg_app = ApplicationBuilder().token(TOKEN).build()
+
+# --- BOT LOGIC FUNCTIONS ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     args = context.args
     user_id = update.effective_user.id
@@ -41,7 +36,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     extracted_args = args[0].split('_') if len(args) == 1 and "_" in args[0] else args
 
-    # Case 1: Single Video -> /start 146_1
     if len(extracted_args) == 2:
         try:
             file_id, ch_num = extracted_args
@@ -51,7 +45,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except ValueError:
             return await update.message.reply_text("❌ Invalid Format.")
     
-    # Case 2: Bulk Videos -> /start 107_240_3_4
     elif len(extracted_args) == 4:
         try:
             start_id, end_id, ch_num, total_parts = map(int, extracted_args)
@@ -59,17 +52,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             target_ch = CHANNELS.get(str(ch_num))
             
             total_videos = len(video_list)
-            
-            # --- AUTO CALCULATION LOGIC ---
-            # Total parts me divide karne ke liye ek part me kitne video dene honge
             if total_parts <= 0:
                 total_parts = 1
             batch_size = math.ceil(total_videos / total_parts)
-            # ------------------------------
             
         except ValueError:
             return await update.message.reply_text("❌ Invalid Numbers.")
-    
     else:
         return await update.message.reply_text("❌ Invalid URL.")
 
@@ -84,7 +72,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "click_time": 0
     }
 
-    # Pehli baar normal message
     await send_ad_step(update, user_id, is_next_part=False)
 
 async def send_ad_step(update, user_id, is_next_part=False):
@@ -145,9 +132,33 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await context.bot.send_message(chat_id=query.message.chat_id, text="🎉 **Sari videos complete ho gayi hain!**")
             if user_id in user_data: del user_data[user_id]
 
+# --- HANDLERS REGISTRATION ---
+tg_app.add_handler(CommandHandler("start", start))
+tg_app.add_handler(CallbackQueryHandler(button_callback))
+
+# --- FLASK SERVER & WEBHOOK FOR VERCEL ---
+app = Flask(__name__) # Vercel के लिए 'app' नाम रखना ज़रूरी था
+
+@app.route('/')
+def home():
+    return "Bot is Active!"
+
+# Vercel पर जब टेलीग्राम से कोई मैसेज आएगा तो वो इस URL (Route) पर आएगा
+@app.route('/webhook', methods=['POST'])
+def webhook():
+    if request.method == "POST":
+        update = Update.de_json(request.get_json(force=True), tg_app.bot)
+        
+        # Vercel के asynchronous वातावरण में हैंडलर को प्रोसेस करने का सही तरीका
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        loop.run_until_complete(tg_app.process_update(update))
+        loop.close()
+        
+        return "OK", 200
+    return "Invalid Request", 400
+
+# लोकल टेस्टिंग के लिए पुराने तरीके को सुरक्षित रखा गया है
 if __name__ == '__main__':
-    Thread(target=run_flask).start()
-    app = ApplicationBuilder().token(TOKEN).build()
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CallbackQueryHandler(button_callback))
-    app.run_polling()
+    # अगर आप अपने कंप्यूटर पर रन कर रहे हैं तो यह चलेगा
+    tg_app.run_polling()

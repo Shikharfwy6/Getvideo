@@ -135,30 +135,41 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # --- HANDLERS REGISTRATION ---
 tg_app.add_handler(CommandHandler("start", start))
 tg_app.add_handler(CallbackQueryHandler(button_callback))
-
 # --- FLASK SERVER & WEBHOOK FOR VERCEL ---
-app = Flask(__name__) # Vercel के लिए 'app' नाम रखना ज़रूरी था
+app = Flask(__name__)
 
 @app.route('/')
 def home():
     return "Bot is Active!"
 
-# Vercel पर जब टेलीग्राम से कोई मैसेज आएगा तो वो इस URL (Route) पर आएगा
 @app.route('/webhook', methods=['POST'])
 def webhook():
     if request.method == "POST":
-        update = Update.de_json(request.get_json(force=True), tg_app.bot)
-        
-        # Vercel के asynchronous वातावरण में हैंडलर को प्रोसेस करने का सही तरीका
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        loop.run_until_complete(tg_app.process_update(update))
-        loop.close()
-        
-        return "OK", 200
+        try:
+            update_json = request.get_json(force=True)
+            update = Update.de_json(update_json, tg_app.bot)
+            
+            # Vercel के Serverless environment के लिए सही तरीका
+            async def process():
+                # 1. पहले चेक करें कि ऐप इनिशियलाइज़ है या नहीं, अगर नहीं तो करें
+                if not tg_app.initialized:
+                    await tg_app.initialize()
+                # 2. मैसेज को प्रोसेस करें
+                await tg_app.process_update(update)
+
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            loop.run_until_complete(process())
+            loop.close()
+            
+            return "OK", 200
+        except Exception as e:
+            logging.error(f"Error in webhook: {e}")
+            return "Error", 500
+            
     return "Invalid Request", 400
 
-# लोकल टेस्टिंग के लिए पुराने तरीके को सुरक्षित रखा गया है
 if __name__ == '__main__':
-    # अगर आप अपने कंप्यूटर पर रन कर रहे हैं तो यह चलेगा
-    tg_app.run_polling()
+    port = int(os.environ.get("PORT", 8000))
+    app.run(host='0.0.0.0', port=port)
+    

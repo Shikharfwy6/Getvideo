@@ -3,8 +3,8 @@ import os
 import time
 import asyncio
 import math
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes, CallbackQueryHandler
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, Bot
+from telegram.ext import CommandHandler, CallbackQueryHandler, CallbackContext, ExtBot
 from flask import Flask, request
 
 # --- CONFIG & LOGGING ---
@@ -22,12 +22,8 @@ CHANNELS = {
 
 user_data = {}
 
-# --- TELEGRAM APPLICATION INITIALIZATION ---
-# बोट ऐप को बिना पोलिंग के सीधे डिफाइन कर रहे हैं
-tg_app = ApplicationBuilder().token(TOKEN).build()
-
 # --- BOT LOGIC FUNCTIONS ---
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def start(update: Update, context: CallbackContext):
     if not update.message:
         return
     args = context.args
@@ -99,7 +95,7 @@ async def send_ad_step(update, user_id, is_next_part=False):
     except Exception as e:
         logging.error(f"Error sending message: {e}")
 
-async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def button_callback(update: Update, context: CallbackContext):
     query = update.callback_query
     user_id = query.from_user.id
     
@@ -143,11 +139,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await context.bot.send_message(chat_id=query.message.chat_id, text="🎉 **Sari videos complete ho gayi hain!**")
             if user_id in user_data: del user_data[user_id]
 
-# --- HANDLERS REGISTRATION ---
-tg_app.add_handler(CommandHandler("start", start))
-tg_app.add_handler(CallbackQueryHandler(button_callback))
-
-# --- FLASK SERVER & WEBHOOK FOR VERCEL ---
+# --- FLASK SERVER & WEBHOOK ---
 app = Flask(__name__)
 
 @app.route('/')
@@ -160,20 +152,25 @@ def webhook():
         try:
             update_json = request.get_json(force=True)
             
-            # बिना ऐप इनिशियलाइज किए सीधे मैसेज प्रोसेस करने का फिक्स तरीका
-            update = Update.de_json(update_json, tg_app.bot)
+            # Vercel (Serverless) के लिए सबसे बेस्ट और लाइटवेट तरीका
+            bot = ExtBot(token=TOKEN)
+            update = Update.de_json(update_json, bot)
+            context = CallbackContext.from_update(update, bot)
             
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            
-            # बिना ऐप ऑब्जेक्ट की बंदिशों के सीधे अपडेट को कोर अपडेटर पर भेजना
-            loop.run_until_complete(tg_app.update_queue.put(update))
-            loop.run_until_complete(tg_app.process_update(update))
-            loop.close()
-            
+            # मैन्युअल रूप से कमांड्स को हैंडल करना (ताकि Vercel रिप्लाई भेजने से पहले बंद न हो)
+            if update.message and update.message.text:
+                text = update.message.text
+                if text.startswith('/start'):
+                    # /start के बाद के आर्गुमेंट्स निकालना
+                    context._args = text.split()[1:] if len(text.split()) > 1 else []
+                    asyncio.run(start(update, context))
+                    
+            elif update.callback_query:
+                asyncio.run(button_callback(update, context))
+                
             return "OK", 200
         except Exception as e:
-            logging.error(f"FIXED ERROR: {e}")
-            return "OK", 200  # टेलीग्राम को हमेशा 200 भेजें ताकि वो अटके नहीं
+            logging.error(f"Error in execution: {e}")
+            return "OK", 200
             
     return "Invalid Request", 400

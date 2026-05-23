@@ -3,7 +3,7 @@ import os
 import time
 import asyncio
 import math
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, Bot
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import CommandHandler, CallbackQueryHandler, CallbackContext, ExtBot
 from flask import Flask, request
 
@@ -26,14 +26,18 @@ user_data = {}
 async def start(update: Update, context: CallbackContext):
     if not update.message:
         return
+    
     args = context.args
     user_id = update.effective_user.id
     
-    if not args:
+    # अगर कोई आर्गुमेंट नहीं है (सिर्फ सीधा /start भेजा है)
+    if not args or len(args) == 0:
         return await update.message.reply_text("👋 Welcome! Bot active hai.")
 
-    extracted_args = args[0].split('_') if len(args) == 1 and "_" in args[0] else args
+    # आर्गुमेंट्स को ठीक से निकालना
+    extracted_args = args[0].split('_') if "_" in args[0] else args
 
+    # Case 1: Single Video -> 249_1
     if len(extracted_args) == 2:
         try:
             file_id, ch_num = extracted_args
@@ -43,6 +47,7 @@ async def start(update: Update, context: CallbackContext):
         except ValueError:
             return await update.message.reply_text("❌ Invalid Format.")
     
+    # Case 2: Bulk Videos -> 249_251_2_1
     elif len(extracted_args) == 4:
         try:
             start_id, end_id, ch_num, total_parts = map(int, extracted_args)
@@ -57,11 +62,12 @@ async def start(update: Update, context: CallbackContext):
         except ValueError:
             return await update.message.reply_text("❌ Invalid Numbers.")
     else:
-        return await update.message.reply_text("❌ Invalid URL.")
+        return await update.message.reply_text("❌ Invalid URL parameters.")
 
     if not target_ch:
         return await update.message.reply_text(f"❌ Channel ID set nahi hai.")
 
+    # डेटा सेव करना
     user_data[user_id] = {
         "videos": video_list,
         "channel": target_ch,
@@ -70,6 +76,7 @@ async def start(update: Update, context: CallbackContext):
         "click_time": 0
     }
 
+    # एडवर्टाइजमेंट स्टेप पर भेजें
     await send_ad_step(update, user_id, is_next_part=False)
 
 async def send_ad_step(update, user_id, is_next_part=False):
@@ -151,18 +158,20 @@ def webhook():
     if request.method == "POST":
         try:
             update_json = request.get_json(force=True)
-            
-            # Vercel (Serverless) के लिए सबसे बेस्ट और लाइटवेट तरीका
             bot = ExtBot(token=TOKEN)
             update = Update.de_json(update_json, bot)
             context = CallbackContext.from_update(update, bot)
             
-            # मैन्युअल रूप से कमांड्स को हैंडल करना (ताकि Vercel रिप्लाई भेजने से पहले बंद न हो)
             if update.message and update.message.text:
                 text = update.message.text
                 if text.startswith('/start'):
-                    # /start के बाद के आर्गुमेंट्स निकालना
-                    context._args = text.split()[1:] if len(text.split()) > 1 else []
+                    # मजबूत और फुल-प्रूफ स्ट्रिंग स्प्लिट लॉजिक
+                    parts = text.split()
+                    if len(parts) > 1:
+                        context._args = [parts[1]]  # यह आपके '249_251_2_1' को एकदम सही पकड़ेगा
+                    else:
+                        context._args = []
+                        
                     asyncio.run(start(update, context))
                     
             elif update.callback_query:

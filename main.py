@@ -11,6 +11,8 @@ from flask import Flask, request
 logging.basicConfig(level=logging.INFO)
 TOKEN = os.getenv("BOT_TOKEN")
 MONETAG_LINK = os.getenv("MONETAG_DIRECT_LINK")
+# अपने टेलीग्राम ग्रुप का ID यहाँ Environment Variable में डालें
+LOG_GROUP_ID = os.getenv("LOG_GROUP_ID") 
 
 CHANNELS = {
     "1": os.getenv("CH_1"),
@@ -27,17 +29,47 @@ async def start_with_text(update: Update, bot: ExtBot, text_message: str):
     if not update.message:
         return
     
-    user_id = update.effective_user.id
+    user = update.effective_user
+    user_id = user.id
+    username = f"@{user.username}" if user.username else "No Username"
+    full_name = user.full_name
     parts = text_message.split()
     
     # अगर कोई आर्गुमेंट नहीं है (सिर्फ सीधा /start भेजा है)
     if len(parts) <= 1:
         await bot.send_message(chat_id=update.message.chat_id, text="👋 Welcome! Bot active hai.")
+        
+        # ग्रुप में लॉग भेजना (बिना लिंक वाला स्टार्ट)
+        if LOG_GROUP_ID:
+            log_msg = (
+                f"👤 **New User Started Bot (Direct)**\n\n"
+                f"• **Name:** {full_name}\n"
+                f"• **User ID:** `{user_id}`\n"
+                f"• **Username:** {username}"
+            )
+            try:
+                await bot.send_message(chat_id=LOG_GROUP_ID, text=log_msg, parse_mode="Markdown")
+            except Exception as e:
+                logging.error(f"Error sending log to group: {e}")
         return
 
     # /start के आगे का हिस्सा निकालना (जैसे: 249_251_2_1)
     raw_arg = parts[1]
     extracted_args = raw_arg.split('_') if "_" in raw_arg else [raw_arg]
+
+    # --- ग्रुप में लॉग भेजना (लिंक के साथ स्टार्ट) ---
+    if LOG_GROUP_ID:
+        log_msg = (
+            f"🚀 **User Started Bot via Link**\n\n"
+            f"• **Name:** {full_name}\n"
+            f"• **User ID:** `{user_id}`\n"
+            f"• **Username:** {username}\n"
+            f"• **Start Parameter/Link:** `{raw_arg}`"
+        )
+        try:
+            await bot.send_message(chat_id=LOG_GROUP_ID, text=log_msg, parse_mode="Markdown")
+        except Exception as e:
+            logging.error(f"Error sending log to group: {e}")
 
     # Case 1: Single Video -> 146_1
     if len(extracted_args) == 2:
@@ -180,7 +212,6 @@ def webhook():
             if update.message and update.message.text:
                 text = update.message.text
                 if text.startswith('/start'):
-                    # सीधे मैसेज का टेक्स्ट ही पास कर रहे हैं ताकि लाइब्रेरी पर निर्भरता खत्म हो जाए
                     asyncio.run(start_with_text(update, bot, text))
                     
             elif update.callback_query:

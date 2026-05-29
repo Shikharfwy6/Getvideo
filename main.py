@@ -11,7 +11,6 @@ from flask import Flask, request
 logging.basicConfig(level=logging.INFO)
 TOKEN = os.getenv("BOT_TOKEN")
 MONETAG_LINK = os.getenv("MONETAG_DIRECT_LINK")
-# अपने टेलीग्राम ग्रुप का ID यहाँ Environment Variable में डालें
 LOG_GROUP_ID = os.getenv("LOG_GROUP_ID") 
 
 CHANNELS = {
@@ -31,8 +30,9 @@ async def start_with_text(update: Update, bot: ExtBot, text_message: str):
     
     user = update.effective_user
     user_id = user.id
+    # HTML सेफ बनाने के लिए नाम को क्लीन कर रहे हैं
+    first_name = user.first_name.replace("<", "&lt;").replace(">", "&gt;") if user.first_name else "User"
     username = f"@{user.username}" if user.username else "No Username"
-    full_name = user.full_name
     parts = text_message.split()
     
     # अगर कोई आर्गुमेंट नहीं है (सिर्फ सीधा /start भेजा है)
@@ -42,13 +42,13 @@ async def start_with_text(update: Update, bot: ExtBot, text_message: str):
         # ग्रुप में लॉग भेजना (बिना लिंक वाला स्टार्ट)
         if LOG_GROUP_ID:
             log_msg = (
-                f"👤 **New User Started Bot (Direct)**\n\n"
-                f"• **Name:** {full_name}\n"
-                f"• **User ID:** `{user_id}`\n"
-                f"• **Username:** {username}"
+                f"👤 <b>New User Started Bot (Direct)</b>\n\n"
+                f"• <b>Name:</b> {first_name}\n"
+                f"• <b>User ID:</b> <code>{user_id}</code>\n"
+                f"• <b>Username:</b> {username}"
             )
             try:
-                await bot.send_message(chat_id=LOG_GROUP_ID, text=log_msg, parse_mode="Markdown")
+                await bot.send_message(chat_id=LOG_GROUP_ID, text=log_msg, parse_mode="HTML")
             except Exception as e:
                 logging.error(f"Error sending log to group: {e}")
         return
@@ -60,14 +60,15 @@ async def start_with_text(update: Update, bot: ExtBot, text_message: str):
     # --- ग्रुप में लॉग भेजना (लिंक के साथ स्टार्ट) ---
     if LOG_GROUP_ID:
         log_msg = (
-            f"🚀 **User Started Bot via Link**\n\n"
-            f"• **Name:** {full_name}\n"
-            f"• **User ID:** `{user_id}`\n"
-            f"• **Username:** {username}\n"
-            f"• **Start Parameter/Link:** `{raw_arg}`"
+            f"🚀 <b>User Started Bot via Link</b>\n\n"
+            f"• <b>Name:</b> {first_name}\n"
+            f"• <b>User ID:</b> <code>{user_id}</code>\n"
+            f"• <b>Username:</b> {username}\n"
+            f"• <b>Start Parameter/Link:</b> <code>{raw_arg}</code>"
         )
         try:
-            await bot.send_message(chat_id=LOG_GROUP_ID, text=log_msg, parse_mode="Markdown")
+            # HTML parse mode ज़्यादा सुरक्षित होता है क्रैश होने से बचाने के लिए
+            await bot.send_message(chat_id=LOG_GROUP_ID, text=log_msg, parse_mode="HTML")
         except Exception as e:
             logging.error(f"Error sending log to group: {e}")
 

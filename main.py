@@ -21,6 +21,15 @@ CHANNELS = {
     "5": os.getenv("CH_5"),
 }
 
+# Aapke channels ki exact URLs ki mapping
+CHANNEL_URL_IDS = {
+    "1": "3952628014",
+    "2": "3758252316",
+    "3": "3736158308",
+    "4": "3195006898",
+    "5": "3307449853"
+}
+
 user_data = {}
 
 # --- BOT LOGIC FUNCTIONS ---
@@ -30,16 +39,14 @@ async def start_with_text(update: Update, bot: ExtBot, text_message: str):
     
     user = update.effective_user
     user_id = user.id
-    # HTML सेफ बनाने के लिए नाम को क्लीन कर रहे हैं
     first_name = user.first_name.replace("<", "&lt;").replace(">", "&gt;") if user.first_name else "User"
     username = f"@{user.username}" if user.username else "No Username"
     parts = text_message.split()
     
-    # अगर कोई आर्गुमेंट नहीं है (सिर्फ सीधा /start भेजा है)
+    # Agar koi argument nahi hai (Direct start)
     if len(parts) <= 1:
         await bot.send_message(chat_id=update.message.chat_id, text="👋 Welcome! Bot active hai.")
         
-        # ग्रुप में लॉग भेजना (बिना लिंक वाला स्टार्ट)
         if LOG_GROUP_ID:
             log_msg = (
                 f"👤 <b>New User Started Bot (Direct)</b>\n\n"
@@ -53,24 +60,12 @@ async def start_with_text(update: Update, bot: ExtBot, text_message: str):
                 logging.error(f"Error sending log to group: {e}")
         return
 
-    # /start के आगे का हिस्सा निकालना (जैसे: 249_251_2_1)
+    # /start ke aage ka data nikalna
     raw_arg = parts[1]
     extracted_args = raw_arg.split('_') if "_" in raw_arg else [raw_arg]
 
-    # --- ग्रुप में लॉग भेजना (लिंक के साथ स्टार्ट) ---
-    if LOG_GROUP_ID:
-        log_msg = (
-            f"🚀 <b>User Started Bot via Link</b>\n\n"
-            f"• <b>Name:</b> {first_name}\n"
-            f"• <b>User ID:</b> <code>{user_id}</code>\n"
-            f"• <b>Username:</b> {username}\n"
-            f"• <b>Start Parameter/Link:</b> <code>{raw_arg}</code>"
-        )
-        try:
-            # HTML parse mode ज़्यादा सुरक्षित होता है क्रैश होने से बचाने के लिए
-            await bot.send_message(chat_id=LOG_GROUP_ID, text=log_msg, parse_mode="HTML")
-        except Exception as e:
-            logging.error(f"Error sending log to group: {e}")
+    ch_num = "Unknown"
+    video_link_str = ""
 
     # Case 1: Single Video -> 146_1
     if len(extracted_args) == 2:
@@ -79,6 +74,13 @@ async def start_with_text(update: Update, bot: ExtBot, text_message: str):
             video_list = [int(file_id)]
             target_ch = CHANNELS.get(str(ch_num))
             batch_size = 1
+            
+            url_id = CHANNEL_URL_IDS.get(str(ch_num))
+            if url_id:
+                video_link_str = f"https://t.me/c/{url_id}/{file_id}"
+            else:
+                video_link_str = "Link generation failed (Unknown Channel)"
+                
         except ValueError:
             await bot.send_message(chat_id=update.message.chat_id, text="❌ Invalid Format.")
             return
@@ -95,6 +97,12 @@ async def start_with_text(update: Update, bot: ExtBot, text_message: str):
                 total_parts = 1
             batch_size = math.ceil(total_videos / total_parts)
             
+            url_id = CHANNEL_URL_IDS.get(str(ch_num))
+            if url_id:
+                video_link_str = f"https://t.me/c/{url_id}/{start_id}"
+            else:
+                video_link_str = "Link generation failed (Unknown Channel)"
+                
         except ValueError:
             await bot.send_message(chat_id=update.message.chat_id, text="❌ Invalid Numbers.")
             return
@@ -102,11 +110,27 @@ async def start_with_text(update: Update, bot: ExtBot, text_message: str):
         await bot.send_message(chat_id=update.message.chat_id, text="❌ Invalid URL Parameters.")
         return
 
+    # --- Group mein bilkul aapke diye gaye format mein message bhejna ---
+    if LOG_GROUP_ID:
+        log_msg = (
+            f"🚀 <b>User Started Bot via Link</b>\n\n"
+            f"• <b>Name:</b> {first_name}\n"
+            f"• <b>User ID:</b> <code>{user_id}</code>\n"
+            f"• <b>Username:</b> {username}\n"
+            f"• <b>Channel no.</b> {ch_num}\n"
+            f"   {video_link_str}"
+        )
+        try:
+            # disable_web_page_preview=True rakha hai taaki link ka bada sa preview group ko ganda na kare
+            await bot.send_message(chat_id=LOG_GROUP_ID, text=log_msg, parse_mode="HTML", disable_web_page_preview=True)
+        except Exception as e:
+            logging.error(f"Error sending log to group: {e}")
+
     if not target_ch:
         await bot.send_message(chat_id=update.message.chat_id, text="❌ Channel ID set nahi hai.")
         return
 
-    # यूज़र का डेटा सेशन सेव करना
+    # User session data save
     user_data[user_id] = {
         "videos": video_list,
         "channel": target_ch,
@@ -115,7 +139,7 @@ async def start_with_text(update: Update, bot: ExtBot, text_message: str):
         "click_time": 0
     }
 
-    # विज्ञापन वाला बटन भेजना
+    # Ad button send
     await send_ad_step_fixed(update, bot, user_id, is_next_part=False)
 
 

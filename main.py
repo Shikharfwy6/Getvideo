@@ -121,7 +121,6 @@ async def start_with_text(update: Update, bot: ExtBot, text_message: str):
             f"   {video_link_str}"
         )
         try:
-            # disable_web_page_preview=True rakha hai taaki link ka bada sa preview group ko ganda na kare
             await bot.send_message(chat_id=LOG_GROUP_ID, text=log_msg, parse_mode="HTML", disable_web_page_preview=True)
         except Exception as e:
             logging.error(f"Error sending log to group: {e}")
@@ -154,7 +153,7 @@ async def send_ad_step_fixed(update, bot: ExtBot, user_id, is_next_part=False):
     ]
     
     if is_next_part:
-        msg_text = "✨ अगला पार्ट तैयार है!\n\nइसी सीरीज़ के और वीडियो के लिए वेरिफाई करें।\n30 सेकंड का विज्ञापन देखें और नीचे दिए गए बटन पर क्लिक करें।"
+        msg_text = "✨ अगला充 पार्ट तैयार है!\n\nइसी सीरीज़ के और वीडियो के लिए वेरिफाई करें।\n30 सेकंड का विज्ञापन देखें aur niche diye gaye button par click karein."
     else:
         msg_text = "⚠️ **Verification Required!**\n\nVideos unlock karne ke liye 30 second ad dekhein aur niche button par click karein."
     
@@ -199,15 +198,40 @@ async def button_callback_fixed(update: Update, bot: ExtBot):
         
         for msg_id in current_batch:
             try:
-                await bot.copy_message(
-                    chat_id=query.message.chat_id,
-                    from_chat_id=data['channel'],
-                    message_id=msg_id
-                )
+                # 1. Pehle hum main channel se message fetch karenge link filter karne ke liye
+                channel_msg = await bot.get_message(chat_id=data['channel'], message_id=msg_id)
+                
+                caption_text = channel_msg.caption or ""
+                clean_entities = []
+                
+                # 2. Agar message me entities (links/formatting) hain, to filter karenge
+                if channel_msg.caption_entities:
+                    for entity in channel_msg.caption_entities:
+                        # text_link (Click here jisme link chhupa hota hai) aur normal url dono ko skip kar dega
+                        if entity.type in ["text_link", "url"]:
+                            continue
+                        clean_entities.append(entity)
+                
+                # 3. Agar post video hai, to custom filtered caption ke sath send karenge
+                if channel_msg.video:
+                    await bot.send_video(
+                        chat_id=query.message.chat_id,
+                        video=channel_msg.video.file_id,
+                        caption=caption_text,
+                        caption_entities=clean_entities
+                    )
+                else:
+                    # Agar koi aur message type ho (jaise text ya photo), to safe fallback copy_message use karega
+                    await bot.copy_message(
+                        chat_id=query.message.chat_id,
+                        from_chat_id=data['channel'],
+                        message_id=msg_id
+                    )
+                    
                 await asyncio.sleep(0.5)
             except Exception as e:
-                logging.error(f"Error copying video {msg_id}: {e}")
-                await bot.send_message(chat_id=query.message.chat_id, text=f"❌ Error: Video {msg_id} nahi mila.")
+                logging.error(f"Error processing video {msg_id}: {e}")
+                await bot.send_message(chat_id=query.message.chat_id, text=f"❌ Error: Video {msg_id} send nahi ho paya.")
 
         user_data[user_id]['current_index'] = end_idx
         

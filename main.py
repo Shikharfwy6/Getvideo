@@ -110,7 +110,7 @@ async def start_with_text(update: Update, bot: ExtBot, text_message: str):
         await bot.send_message(chat_id=update.message.chat_id, text="❌ Invalid URL Parameters.")
         return
 
-    # --- Group mein bilkul aapke diye gaye format mein message bhejna ---
+    # --- Group mein bilkul aapke gaye format mein message bhejna ---
     if LOG_GROUP_ID:
         log_msg = (
             f"🚀 <b>User Started Bot via Link</b>\n\n"
@@ -121,7 +121,6 @@ async def start_with_text(update: Update, bot: ExtBot, text_message: str):
             f"   {video_link_str}"
         )
         try:
-            # disable_web_page_preview=True rakha hai taaki link ka bada sa preview group ko ganda na kare
             await bot.send_message(chat_id=LOG_GROUP_ID, text=log_msg, parse_mode="HTML", disable_web_page_preview=True)
         except Exception as e:
             logging.error(f"Error sending log to group: {e}")
@@ -154,7 +153,7 @@ async def send_ad_step_fixed(update, bot: ExtBot, user_id, is_next_part=False):
     ]
     
     if is_next_part:
-        msg_text = "✨ अगला पार्ट तैयार है!\n\nइसी सीरीज़ के और वीडियो के लिए वेरिफाई करें।\n30 सेकंड का विज्ञापन देखें और नीचे दिए गए बटन पर क्लिक करें।"
+        msg_text = "✨ अगला पार्ट तैयार है!\n\nइसी सीरीज़ के और वीडियो के लिए वेरिफाई करें।\n30 सेकंड का विज्ञापन देखें aur niche diye gaye button par click karein."
     else:
         msg_text = "⚠️ **Verification Required!**\n\nVideos unlock karne ke liye 30 second ad dekhein aur niche button par click karein."
     
@@ -199,15 +198,32 @@ async def button_callback_fixed(update: Update, bot: ExtBot):
         
         for msg_id in current_batch:
             try:
-                await bot.copy_message(
-                    chat_id=query.message.chat_id,
-                    from_chat_id=data['channel'],
-                    message_id=msg_id
-                )
+                # 1. Main channel se video message fetch karein
+                channel_msg = await bot.get_message(chat_id=data['channel'], message_id=msg_id)
+                
+                # 2. Caption copy logic (Normal plain text nikalna taaki text_links delete ho jayein)
+                # channel_msg.caption lene se text ke andar ke links khud-ba-khud hat jaate hain
+                clean_caption = channel_msg.caption if channel_msg.caption else ""
+                
+                # 3. Naye filtered caption ke saath video send karein
+                if channel_msg.video:
+                    await bot.send_video(
+                        chat_id=query.message.chat_id,
+                        video=channel_msg.video.file_id,
+                        caption=clean_caption
+                    )
+                else:
+                    # Fallback: Agar kisi wajah se video nahi h (Text/Photo h), to safe side copy_message chalega
+                    await bot.copy_message(
+                        chat_id=query.message.chat_id,
+                        from_chat_id=data['channel'],
+                        message_id=msg_id
+                    )
+                    
                 await asyncio.sleep(0.5)
             except Exception as e:
-                logging.error(f"Error copying video {msg_id}: {e}")
-                await bot.send_message(chat_id=query.message.chat_id, text=f"❌ Error: Video {msg_id} nahi mila.")
+                logging.error(f"Error processing video {msg_id}: {e}")
+                await bot.send_message(chat_id=query.message.chat_id, text=f"❌ Error: Video {msg_id} nahi mila ya send nahi hua.")
 
         user_data[user_id]['current_index'] = end_idx
         

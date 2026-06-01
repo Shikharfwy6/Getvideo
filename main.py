@@ -14,7 +14,6 @@ from pymongo import MongoClient
 # --- CONFIG & LOGGING ---
 logging.basicConfig(level=logging.INFO)
 TOKEN = os.getenv("BOT_TOKEN")
-MONETAG_LINK = os.getenv("MONETAG_DIRECT_LINK")
 LOG_GROUP_ID = os.getenv("LOG_GROUP_ID") 
 MONGO_URI = os.getenv("MONGO_URI")
 
@@ -23,7 +22,7 @@ client = MongoClient(MONGO_URI)
 db = client['tg_bot_db']
 users_collection = db['verified_users']
 
-# TTL Index (8 ghante baad 'expire_at' wali entries automatic delete ho jayengi)
+# TTL Index (8 ghante baad data automatic delete ho jayega)
 users_collection.create_index("expire_at", expireAfterSeconds=0)
 
 CHANNELS = {
@@ -42,7 +41,7 @@ CHANNEL_URL_IDS = {
     "5": "3307449853"
 }
 
-# Ram ki jagah active video tracking ke liye session (Bina verification ke video data temporary store rakhne ke liye)
+# Video tracking memory session
 active_video_sessions = {}
 
 # --- HELPER FUNCTIONS ---
@@ -57,7 +56,7 @@ def get_short_link(user_id, bot_username, token):
     user_db = users_collection.find_one({"_id": user_id})
     loop_count = user_db.get("loop_count", 0) if user_db else 0
     
-    # 8-8 Ghante ke loop badalne ka API sequence tracker
+    # 8-8 Ghante ka loop track sequence
     if loop_count % 3 == 0:
         api_url = f"https://arolinks.com/api?api=f4617908b561110a219cd2b65bc255c2c2c6ff8a&url={destination_url}&format=text"
     elif loop_count % 3 == 1:
@@ -74,23 +73,66 @@ def get_short_link(user_id, bot_username, token):
     
     return destination_url
 
+async def send_all_videos(bot: ExtBot, chat_id, user_id):
+    """User ko instantly sari videos copy karke dene ka function"""
+    if user_id not in active_video_sessions:
+        return
+        
+    data = active_video_sessions[user_id]
+    videos = data['videos']
+    channel = data['channel']
+    
+    # Send videos looping
+    for msg_id in videos:
+        try:
+            await bot.copy_message(
+                chat_id=chat_id,
+                from_chat_id=channel,
+                message_id=msg_id
+            )
+            await asyncio.sleep(0.5)
+        except Exception as e:
+            logging.error(f"Error transferring video {msg_id}: {e}")
+            
+    # --- LOG TO GROUP ONLY AFTER SUCCESSFUL DELIVERY ---
+    if LOG_GROUP_ID:
+        try:
+            # User details nikalne ke liye dummy update variable handle na karke direct call
+            chat_member = await bot.get_chat(chat_id)
+            first_name = chat_member.first_name.replace("<", "&lt;").replace(">", "&gt;") if chat_member.first_name else "User"
+            username = f"@{chat_member.username}" if chat_member.username else "No Username"
+            
+            log_msg = (
+                f"✅ <b>User Passed Shortener & Got Video</b>\n\n"
+                f"• <b>Name:</b> {first_name}\n"
+                f"• <b>User ID:</b> <code>{user_id}</code>\n"
+                f"• <b>Username:</b> {username}\n"
+                f"• <b>Channel no.</b> {data['ch_num']}\n"
+                f"   {data['video_link_str']}"
+            )
+            await bot.send_message(chat_id=LOG_GROUP_ID, text=log_msg, parse_mode="HTML", disable_web_page_preview=True)
+        except Exception as e:
+            logging.error(f"Group notification failed: {e}")
+            
+    # Message complete hone par session delete
+    del active_video_sessions[user_id]
+    await bot.send_message(chat_id=chat_id, text="🎉 **Aapki saari videos successfully send kar di gayi hain!**")
+
 # --- BOT LOGIC FUNCTIONS ---
 async def start_with_text(update: Update, bot: ExtBot, text_message: str):
     if not update.message or not update.effective_user:
         return
     
-    # CRITICAL FIX: Sabse pehle user_id nikalna compulsory hai
     user_id = update.effective_user.id
     chat_id = update.message.chat_id
     parts = text_message.split()
-    
     bot_info = await bot.get_me()
     bot_username = bot_info.username
 
-    # STEP 1: Database me nikaali gayi ID search karo
+    # STEP 1: DB me ID check karo
     user_db = users_collection.find_one({"_id": user_id})
     
-    # STEP 2: Agar ID nahi mili (Naya User), to turant database me record create karo
+    # STEP 2: Agar nahi hai to unverified data insert karo
     if not user_db:
         user_db = {
             "_id": user_id,
@@ -99,23 +141,20 @@ async def start_with_text(update: Update, bot: ExtBot, text_message: str):
             "pending_token": None
         }
         users_collection.insert_one(user_db)
-        logging.info(f" Successfully generated new profile in MongoDB for User ID: {user_id}")
 
-    # Argument check (/start ke aage kuch hai ya nahi)
     if len(parts) <= 1:
         await bot.send_message(chat_id=chat_id, text="👋 Welcome! Bot active hai. Kisi video link par click karke aao.")
         return
 
     raw_arg = parts[1]
 
-    # CASE A: User shortener completely solve karke return aaya hai token lekar
+    # CASE A: User shortener solve karke return aaya hai token ke sath
     if raw_arg.startswith("vrf_"):
-        # Server restart se bachne ke liye database se pending_token match karo
         if user_db.get("pending_token") == raw_arg:
             current_loop = user_db.get("loop_count", 0)
             expire_time = datetime.utcnow() + timedelta(hours=8)
             
-            # DB entry update karo (Status verified ho gaya 8 ghante ke liye)
+            # DB verify status update
             users_collection.update_one(
                 {"_id": user_id},
                 {
@@ -123,26 +162,25 @@ async def start_with_text(update: Update, bot: ExtBot, text_message: str):
                         "status": "verify",
                         "expire_at": expire_time,
                         "loop_count": current_loop + 1,
-                        "pending_token": None  # Token clear karo
+                        "pending_token": None
                     }
                 }
             )
-            await bot.send_message(chat_id=chat_id, text="✅ Verification Successful! Aapka 8 ghante ka session active ho gaya hai.")
+            await bot.send_message(chat_id=chat_id, text="✅ Verification Successful! Aapka 8 ghante ka access active ho gaya hai.")
             
-            # Agar session storage me videos pending hain to direct move on to ad
+            # Instant sari video send karo jo memory session me ruki thi
             if user_id in active_video_sessions:
-                await send_ad_step_fixed(update, bot, user_id, is_next_part=False)
+                await send_all_videos(bot, chat_id, user_id)
             return
         else:
-            await bot.send_message(chat_id=chat_id, text="❌ Invalid Token ya dynamic link expire ho chuka hai. Dubara koshish karein.")
+            await bot.send_message(chat_id=chat_id, text="❌ Invalid Token ya link expire ho chuka hai. Dubara try karein.")
             return
 
-    # CASE B: User video links ke sath aaya hai (Jaise 8607_2 ya bulk lines)
+    # CASE B: User normal/bulk video links ke sath aaya hai (e.g. 8607_2)
     extracted_args = raw_arg.split('_') if "_" in raw_arg else [raw_arg]
     ch_num = "Unknown"
     video_link_str = ""
     video_list = []
-    batch_size = 1
 
     if len(extracted_args) == 2:
         try:
@@ -153,7 +191,7 @@ async def start_with_text(update: Update, bot: ExtBot, text_message: str):
             if url_id:
                 video_link_str = f"https://t.me/c/{url_id}/{file_id}"
         except ValueError:
-            await bot.send_message(chat_id=chat_id, text="❌ Invalid Format parameters.")
+            await bot.send_message(chat_id=chat_id, text="❌ Invalid Format.")
             return
     
     elif len(extracted_args) == 4:
@@ -161,42 +199,34 @@ async def start_with_text(update: Update, bot: ExtBot, text_message: str):
             start_id, end_id, ch_num, total_parts = map(int, extracted_args)
             video_list = list(range(start_id, end_id + 1))
             target_ch = CHANNELS.get(str(ch_num))
-            total_videos = len(video_list)
-            batch_size = math.ceil(total_videos / (total_parts if total_parts > 0 else 1))
             url_id = CHANNEL_URL_IDS.get(str(ch_num))
             if url_id:
                 video_link_str = f"https://t.me/c/{url_id}/{start_id}"
         except ValueError:
-            await bot.send_message(chat_id=chat_id, text="❌ Parameters validation error.")
+            await bot.send_message(chat_id=chat_id, text="❌ Invalid parameters value.")
             return
     else:
-        await bot.send_message(chat_id=chat_id, text="❌ Param strings verification error.")
+        await bot.send_message(chat_id=chat_id, text="❌ Invalid Param strings.")
         return
 
     if not target_ch:
-        await bot.send_message(chat_id=chat_id, text="❌ Channel setting configurations missing.")
+        await bot.send_message(chat_id=chat_id, text="❌ Channel config missing.")
         return
 
-    # User ke video data ko in-memory session me save karo
+    # Video records session memory track me dalo
     active_video_sessions[user_id] = {
         "videos": video_list,
         "channel": target_ch,
-        "batch_size": batch_size,
-        "current_index": 0,
-        "click_time": 0,
         "video_link_str": video_link_str,
         "ch_num": ch_num
     }
 
-    # STEP 3: Ab check karo ki status 'verify' hai ya nahi.
-    # Naya user unverified hoga ya 8 ghante baad data expire ho gaya hoga, to use verify karwao
+    # STEP 3: Check Verify Status. Agar verified nahi hai to Shortener link do
     if user_db.get("status") != "verify":
         token = generate_random_token()
-        
-        # Is token ko MongoDB me save karo taaki bot bhule nahi
         users_collection.update_one({"_id": user_id}, {"$set": {"pending_token": token}})
         
-        status_msg = await bot.send_message(chat_id=chat_id, text="⏳ Generating secure 8-hour gateway link...")
+        status_msg = await bot.send_message(chat_id=chat_id, text="⏳ Generating secure shortener link...")
         short_link = get_short_link(user_id, bot_username, token)
         
         try:
@@ -207,122 +237,14 @@ async def start_with_text(update: Update, bot: ExtBot, text_message: str):
         keyboard = [[InlineKeyboardButton("🔗 Click Here to Verify (8 Hours)", url=short_link)]]
         await bot.send_message(
             chat_id=chat_id,
-            text="⚠️ **Verification Required!**\n\nAapka 8-ghante ka access token active nahi hai ya expire ho chuka hai. Niche diye link par click karke verify karein tabhi video unlock hogi.",
+            text="⚠️ **Verification Required!**\n\nVideos unlock karne ke liye niche diye link par click karke open karein. Ek baar verify karne par 8 ghante tak koi link nahi aayega.",
             reply_markup=InlineKeyboardMarkup(keyboard),
             parse_mode="Markdown"
         )
         return
 
-    # Agar user already verified hai tabhi ad step dikhega
-    await send_ad_step_fixed(update, bot, user_id, is_next_part=False)
-
-
-async def send_ad_step_fixed(update, bot: ExtBot, user_id, is_next_part=False):
-    if user_id not in active_video_sessions:
-        return
-    
-    keyboard = [
-        [InlineKeyboardButton("📺 Watch Ad (30 Sec)", url=MONETAG_LINK or "https://google.com")],
-        [InlineKeyboardButton("✅ Verify & Get Videos", callback_data="verify_batch")]
-    ]
-    
-    if is_next_part:
-        msg_text = "✨ अगला पार्ट तैयार है!\n\nइसी सीरीज़ के और वीडियो ke liye dubara verify karein.\nपहले **Watch Ad** link kholin, phir 30 second baad niche wale verify button par click karein."
-    else:
-        msg_text = "⚠️ **Ad Watch Verification Required!**\n\nVideos fetch karne ke liye niche wale **Watch Ad** par click karke 30s check karne dein, uske baad verification button confirm karein."
-    
-    try:
-        chat_id = update.message.chat_id if update.message else update.callback_query.message.chat_id
-        await bot.send_message(chat_id=chat_id, text=msg_text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
-    except Exception as e:
-        logging.error(f"Error sending monetag menu interface layouts: {e}")
-
-
-async def button_callback_fixed(update: Update, bot: ExtBot):
-    query = update.callback_query
-    user_id = query.from_user.id
-    
-    if user_id not in active_video_sessions:
-        try:
-            await bot.answer_callback_query(callback_query_id=query.id, text="❌ Session expired. Please click on video link again.", show_alert=True)
-        except Exception:
-            pass
-        return
-
-    if query.data == "verify_batch":
-        click_time = active_video_sessions[user_id].get('click_time', 0)
-        
-        # Timer strict validation tracker
-        if click_time == 0:
-            active_video_sessions[user_id]['click_time'] = time.time()
-            try:
-                await bot.answer_callback_query(
-                    callback_query_id=query.id, 
-                    text="⏳ Timer Locked! Aapne bina 30 second ad dekhe verify dabaya. Ab se exact 30 seconds baad is button ko dubara dabayein tabhi video copy hogi.", 
-                    show_alert=True
-                )
-            except Exception:
-                pass
-            return
-            
-        gap = time.time() - click_time
-        if gap < 30:
-            try:
-                await bot.answer_callback_query(callback_query_id=query.id, text=f"❌ Wait karein! Abhi bhi {int(30 - gap)}s bache huye hain.", show_alert=True)
-            except Exception:
-                pass
-            return
-        
-        try:
-            await bot.answer_callback_query(callback_query_id=query.id, text="✅ Video Verified!")
-            await bot.delete_message(chat_id=query.message.chat_id, message_id=query.message.message_id)
-        except Exception:
-            pass
-        
-        data = active_video_sessions[user_id]
-        start_idx = data['current_index']
-        end_idx = start_idx + data['batch_size']
-        current_batch = data['videos'][start_idx:end_idx]
-        
-        # Process forwarding task
-        for msg_id in current_batch:
-            try:
-                await bot.copy_message(
-                    chat_id=query.message.chat_id,
-                    from_chat_id=data['channel'],
-                    message_id=msg_id
-                )
-                await asyncio.sleep(0.5)
-            except Exception as e:
-                logging.error(f"Error transferring database records: {e}")
-
-        # LOG FOR CHANNELS TRACK: Sirf video deliver hone ke baad notification group me jayega
-        if LOG_GROUP_ID and start_idx == 0:
-            user = query.from_user
-            first_name = user.first_name.replace("<", "&lt;").replace(">", "&gt;") if user.first_name else "User"
-            username = f"@{user.username}" if user.username else "No Username"
-            log_msg = (
-                f"💰 <b>User Watched Ad & Got Video</b>\n\n"
-                f"• <b>Name:</b> {first_name}\n"
-                f"• <b>User ID:</b> <code>{user_id}</code>\n"
-                f"• <b>Username:</b> {username}\n"
-                f"• <b>Channel no.</b> {data['ch_num']}\n"
-                f"   {data['video_link_str']}"
-            )
-            try:
-                await bot.send_message(chat_id=LOG_GROUP_ID, text=log_msg, parse_mode="HTML", disable_web_page_preview=True)
-            except Exception as e:
-                logging.error(f"Group notification pipe mismatch: {e}")
-
-        active_video_sessions[user_id]['current_index'] = end_idx
-        active_video_sessions[user_id]['click_time'] = 0 # Reset state
-        
-        if end_idx < len(data['videos']):
-            await send_ad_step_fixed(update, bot, user_id, is_next_part=True)
-        else:
-            await bot.send_message(chat_id=query.message.chat_id, text="🎉 **Sari videos successfully deliver ho chuki hain!**")
-            if user_id in active_video_sessions: 
-                del active_video_sessions[user_id]
+    # STEP 4: Agar already verified hai, to INSTANT saari videos copy karke de do
+    await send_all_videos(bot, chat_id, user_id)
 
 
 # --- FLASK SERVER ROUTING PIPELINES ---
@@ -330,7 +252,7 @@ app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return "Bot Core Engines are Active!"
+    return "Bot is Active without Monetag!"
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
@@ -345,12 +267,9 @@ def webhook():
                 if text.startswith('/start'):
                     asyncio.run(start_with_text(update, bot, text))
                     
-            elif update.callback_query:
-                asyncio.run(button_callback_fixed(update, bot))
-                
             return "OK", 200
         except Exception as e:
-            logging.error(f"Global routing exception errors catch: {e}")
+            logging.error(f"Global webhook error: {e}")
             return "OK", 200
             
     return "Bad Request", 400

@@ -14,6 +14,7 @@ from pymongo import MongoClient
 # --- CONFIG & LOGGING ---
 logging.basicConfig(level=logging.INFO)
 TOKEN = os.getenv("BOT_TOKEN")
+# Yahan aapka Monetag direct link aayega
 MONETAG_LINK = os.getenv("MONETAG_DIRECT_LINK") or "https://google.com"
 LOG_GROUP_ID = os.getenv("LOG_GROUP_ID") 
 MONGO_URI = os.getenv("MONGO_URI")
@@ -31,55 +32,7 @@ CHANNELS = {
     "5": os.getenv("CH_5"),
 }
 
-CHANNEL_URL_IDS = {
-    "1": "3952628014",
-    "2": "3758252316",
-    "3": "3736158308",
-    "4": "3195006898",
-    "5": "3307449853"
-}
-
 user_data = {}
-
-API_CONFIGS = [
-    {"name": "arolinks", "url": "https://arolinks.com/api?api=f4617908b561110a219cd2b65bc255c2c2c6ff8a&url={url}"},
-    {"name": "vplink", "url": "https://vplink.in/api?api=017ab25e4402465d00047e8e2897f3c6b38afbd9&url={url}"},
-    {"name": "instantlinks", "url": "https://instantlinks.co/api?api=323c4585c0d0b8bc04a170cd57a2e6a74ac6d8aa&url={url}"}
-]
-
-# --- HELPER FUNCTIONS ---
-def get_short_link(api_template, destination_url):
-    try:
-        formatted_url = api_template.format(url=destination_url)
-        response = requests.get(formatted_url, timeout=10)
-        if response.status_code == 200:
-            res_data = response.text.strip()
-            if "shortenedUrl" in res_data or "shortlink" in res_data:
-                import json
-                try:
-                    js = json.loads(res_data)
-                    return js.get("shortenedUrl") or js.get("shortlink") or destination_url
-                except:
-                    return res_data
-            return res_data
-    except Exception as e:
-        logging.error(f"Shortener API Error: {e}")
-    return destination_url
-
-def check_verification(user_id):
-    user = users_collection.find_one({"_id": int(user_id)})
-    if user:
-        expiry = user.get("expiry")
-        if expiry and datetime.utcnow() < expiry:
-            if user.get("status") == "verify":
-                return True
-    return False
-
-def get_next_api_index(user_id):
-    user = users_collection.find_one({"_id": int(user_id)})
-    if user:
-        return user.get("current_api_idx", 0) % len(API_CONFIGS)
-    return 0
 
 # --- BOT LOGIC FUNCTIONS ---
 async def start_with_text(update: Update, bot: ExtBot, text_message: str):
@@ -89,75 +42,13 @@ async def start_with_text(update: Update, bot: ExtBot, text_message: str):
     user = update.effective_user
     user_id = int(user.id)
     parts = text_message.split()
-    
     raw_arg = parts[1] if len(parts) > 1 else ""
-
-    if raw_arg.startswith("v_"):
-        token_parts = raw_arg.split("_")
-        if len(token_parts) == 3:
-            _, target_uid, unique_token = token_parts
-            if str(user_id) == str(target_uid):
-                db_user = users_collection.find_one({"_id": user_id})
-                if db_user and db_user.get("pending_token") == unique_token:
-                    next_idx = (db_user.get("current_api_idx", 0) + 1) % len(API_CONFIGS)
-                    
-                    users_collection.update_one(
-                        {"_id": user_id},
-                        {
-                            "$set": {
-                                "status": "verify",
-                                "expiry": datetime.utcnow() + timedelta(hours=8),
-                                "current_api_idx": next_idx
-                            },
-                            "$unset": {"pending_token": ""}
-                        },
-                        upsert=True
-                    )
-                    await bot.send_message(chat_id=update.message.chat_id, text="✅ **Verification Successful!** Aapki verification agle 8 ghanto ke liye valid hai.")
-                    
-                    if user_id in user_data and "saved_arg" in user_data[user_id]:
-                        raw_arg = user_data[user_id]["saved_arg"]
-                    else:
-                        return
-                else:
-                    await bot.send_message(chat_id=update.message.chat_id, text="❌ **Verification link invalid ya expired!**")
-                    return
-            else:
-                await bot.send_message(chat_id=update.message.chat_id, text="❌ Yeh link kisi aur user ke liye hai.")
-                return
 
     if not raw_arg:
         await bot.send_message(chat_id=update.message.chat_id, text="👋 Welcome! Bot active hai.")
         return
 
-    is_verified = check_verification(user_id)
-    if not is_verified:
-        unique_token = str(uuid.uuid4())[:12]
-        
-        users_collection.update_one(
-            {"_id": user_id},
-            {"$set": {"pending_token": unique_token}},
-            upsert=True
-        )
-        
-        bot_username = (await bot.get_me()).username
-        verification_dest_url = f"https://t.me/{bot_username}?start=v_{user_id}_{unique_token}"
-        
-        api_idx = get_next_api_index(user_id)
-        selected_api = API_CONFIGS[api_idx]
-        shortened_verify_url = get_short_link(selected_api["url"], verification_dest_url)
-        
-        user_data[user_id] = {"saved_arg": raw_arg}
-        
-        keyboard = [[InlineKeyboardButton("🔗 Complete Verification", url=shortened_verify_url)]]
-        await bot.send_message(
-            chat_id=update.message.chat_id,
-            text=f"⚠️ **Verification Required!**\n\nAapko 8 ghante ke liye verify karna hoga.",
-            reply_markup=InlineKeyboardMarkup(keyboard),
-            parse_mode="Markdown"
-        )
-        return
-
+    # Video processing configurations
     extracted_args = raw_arg.split('_') if "_" in raw_arg else [raw_arg]
     if len(extracted_args) == 2:
         file_id, ch_num = extracted_args
@@ -177,7 +68,8 @@ async def start_with_text(update: Update, bot: ExtBot, text_message: str):
         "channel": target_ch,
         "batch_size": batch_size,
         "current_index": 0,
-        "click_time": 0
+        "click_time": 0,
+        "ad_clicked": False
     }
     await send_ad_step_fixed(update, bot, user_id)
 
@@ -185,16 +77,19 @@ async def send_ad_step_fixed(update, bot: ExtBot, user_id):
     if user_id not in user_data:
         return
     
-    # 2 Buttons Fix: 1st Button acts as both redirect & timer start using web_app feature.
+    # 2 Buttons Menu: Pehle srif "Watch Ad" dikhega jo background me timer control karega
     keyboard = [
         [InlineKeyboardButton("📺 Watch Ad & Start Timer", web_app=WebAppInfo(url=MONETAG_LINK))],
         [InlineKeyboardButton("✅ Verify & Get Videos", callback_data="verify_batch")]
     ]
     
-    # Jaise hi user Ad button dabayega, hmare system ko instant message milega and timer back-end me automatic run hona suru ho jayega.
-    user_data[user_id]['click_time'] = time.time()
+    msg_text = (
+        "⚠️ **Ad Verification Loop:**\n\n"
+        "1. Pehle **'📺 Watch Ad & Start Timer'** par click karein.\n"
+        "2. Ad khulne ke baad **30 Seconds** tak rukiye.\n"
+        "3. Uske baad wapas aakar **'✅ Verify & Get Videos'** dabayein."
+    )
     
-    msg_text = "⚠️ **Ad Verification**\n\n1. **Watch Ad** wale button par click karein.\n2. **30 Seconds** tak page par wait karein.\n3. Uske baad **Verify & Get Videos** par click karein."
     chat_id = update.message.chat_id if update.message else update.callback_query.message.chat_id
     await bot.send_message(chat_id=chat_id, text=msg_text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
 
@@ -204,66 +99,77 @@ async def button_callback_fixed(update: Update, bot: ExtBot):
     user = query.from_user
     
     if user_id not in user_data:
-        await query.answer("❌ Session expired.", show_alert=True)
+        await query.answer("❌ Session expired. Please try again.", show_alert=True)
         return
 
     if query.data == "verify_batch":
+        # SECURITY CHECK 1: Agar user ne web_app ad link par click hi nahi kiya
+        # Telegram rules ke mutabik web_app open hote hi current time initialize ho jata hai hmare database/cache me.
         click_time = user_data[user_id].get('click_time', 0)
         
-        # 30 second time check
+        if click_time == 0:
+            # Matlab user ne seedha bina ad dekhe verify dabane ki koshish ki
+            await query.answer("❌ Pehle upar diye gaye 'Watch Ad' button par click karke ad dekhein!", show_alert=True)
+            return
+
+        # SECURITY CHECK 2: Time Gap verification (30 seconds)
         gap = time.time() - click_time
         if gap < 30:
-            await query.answer(f"❌ Ad verification complete nahi hui! Aur {int(30 - gap)}s baaki hain.", show_alert=True)
+            await query.answer(f"❌ Ad verification incomplete! Aur {int(30 - gap)}s baaki hain.", show_alert=True)
             return
         
-        await query.answer("✅ Ad Verified! Sending Videos...")
-        
-        data = user_data[user_id]
-        start_idx = data['current_index']
-        end_idx = start_idx + data['batch_size']
-        current_batch = data['videos'][start_idx:end_idx]
-        
-        videos_sent_successfully = False
-        for msg_id in current_batch:
-            try:
-                await bot.copy_message(chat_id=query.message.chat_id, from_chat_id=data['channel'], message_id=msg_id)
-                videos_sent_successfully = True
-                await asyncio.sleep(0.5)
-            except Exception as e: 
-                logging.error(e)
+        # Agar dono checks paas ho gaye, toh video delivery shuru
+        await query.answer("✅ Verification Successful!")
+        await process_video_delivery(update, bot, user_id, user)
 
-        # FIX 1: LOG CHANNELS NOTIFICATION (Srif jab user ko video receive ho chuki ho)
-        if videos_sent_successfully and LOG_GROUP_ID:
-            try:
-                first_name = user.first_name or "User"
-                username = f"@{user.username}" if user.username else "No Username"
-                log_message = (
-                    f"📤 **Video Received Successfully!**\n\n"
-                    f"👤 **User:** {first_name}\n"
-                    f"🆔 **ID:** `{user_id}`\n"
-                    f"🌐 **Username:** {username}\n"
-                    f"📦 **Batch Range:** {start_idx + 1} to {min(end_idx, len(data['videos']))}\n"
-                    f"⏰ **Time:** {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')} UTC"
-                )
-                await bot.send_message(chat_id=LOG_GROUP_ID, text=log_message, parse_mode="Markdown")
-            except Exception as log_err:
-                logging.error(f"Error sending to Log Channel: {log_err}")
+async def process_video_delivery(update, bot: ExtBot, user_id, user):
+    query = update.callback_query
+    data = user_data[user_id]
+    start_idx = data['current_index']
+    end_idx = start_idx + data['batch_size']
+    current_batch = data['videos'][start_idx:end_idx]
+    
+    videos_sent_successfully = False
+    for msg_id in current_batch:
+        try:
+            await bot.copy_message(chat_id=query.message.chat_id, from_chat_id=data['channel'], message_id=msg_id)
+            videos_sent_successfully = True
+            await asyncio.sleep(0.5)
+        except Exception as e: 
+            logging.error(e)
 
-        user_data[user_id]['current_index'] = end_idx
-        if end_idx < len(data['videos']):
-            # Next part ke liye timer clear karke fir se generate karenge
-            user_data[user_id]['click_time'] = 0
-            await send_ad_step_fixed(update, bot, user_id)
-        else:
-            await bot.send_message(chat_id=query.message.chat_id, text="🎉 Saari videos complete ho gayi hain!")
+    # LOG CHANNEL LOGIC (Srif tabhi notification jayega jab delivery complete ho)
+    if videos_sent_successfully and LOG_GROUP_ID:
+        try:
+            first_name = user.first_name or "User"
+            username = f"@{user.username}" if user.username else "No Username"
+            log_message = (
+                f"📤 **Video Received Successfully!**\n\n"
+                f"👤 **User:** {first_name}\n"
+                f"🆔 **ID:** `{user_id}`\n"
+                f"🌐 **Username:** {username}\n"
+                f"📦 **Batch:** {start_idx + 1} to {min(end_idx, len(data['videos']))}\n"
+                f"⏰ **Time:** {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')} UTC"
+            )
+            await bot.send_message(chat_id=LOG_GROUP_ID, text=log_message, parse_mode="Markdown")
+        except Exception as log_err:
+            logging.error(f"Log Channel Error: {log_err}")
+
+    user_data[user_id]['current_index'] = end_idx
+    if end_idx < len(data['videos']):
+        # Reset for next batch loop
+        user_data[user_id]['click_time'] = 0
+        await send_ad_step_fixed(update, bot, user_id)
+    else:
+        await bot.send_message(chat_id=query.message.chat_id, text="🎉 Saari videos complete ho gayi hain!")
+        if user_id in user_data:
             del user_data[user_id]
 
 # --- FLASK SERVER & WEBHOOK ---
 app = Flask(__name__)
 
 @app.route('/')
-def home():
-    return "Bot is Active!"
+def home(): return "Bot is Active!"
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
@@ -273,16 +179,21 @@ def webhook():
             bot = ExtBot(token=TOKEN)
             update = Update.de_json(update_json, bot)
             
-            if update.message and update.message.text:
-                text = update.message.text
-                if text.startswith('/start'):
-                    asyncio.run(start_with_text(update, bot, text))
+            # Catching WebApp or normal start events
+            if update.message:
+                # Jab user WebApp (Ad link) open karta hai, toh bot ko automatic message update event receive ho jata hai
+                user_id = int(update.message.from_user.id)
+                if user_id in user_data and user_data[user_id]['click_time'] == 0:
+                    # Jaise hi user ne ad open kiya, backend me hmara timer initialize ho gaya!
+                    user_data[user_id]['click_time'] = time.time()
+                
+                if update.message.text and update.message.text.startswith('/start'):
+                    asyncio.run(start_with_text(update, bot, update.message.text))
                     
             elif update.callback_query:
                 asyncio.run(button_callback_fixed(update, bot))
-                
             return "OK", 200
         except Exception as e:
-            logging.error(f"Webhook Execution Error: {e}")
+            logging.error(f"Webhook Error: {e}")
             return "OK", 200
     return "Invalid Request", 400

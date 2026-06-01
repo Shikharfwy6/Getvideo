@@ -12,7 +12,6 @@ logging.basicConfig(level=logging.INFO)
 TOKEN = os.getenv("BOT_TOKEN")
 LOG_GROUP_ID = os.getenv("LOG_GROUP_ID") 
 
-# Channels jahan se videos copy karni hain (Env Variables)
 CHANNELS = {
     "1": os.getenv("CH_1"),
     "2": os.getenv("CH_2"),
@@ -21,7 +20,6 @@ CHANNELS = {
     "5": os.getenv("CH_5"),
 }
 
-# Logs me direct link generate karne ke liye chat IDs mapping
 CHANNEL_CHAT_IDS = {
     "1": "3952628014",
     "2": "3758252316",
@@ -30,7 +28,6 @@ CHANNEL_CHAT_IDS = {
     "5": "3307449853"
 }
 
-# In-memory dictionary active delivery sessions track karne ke liye
 user_data = {}
 
 # --- BOT LOGIC FUNCTIONS ---
@@ -45,12 +42,10 @@ async def start_with_text(update: Update, bot: ExtBot, text_message: str):
     parts = text_message.split()
     raw_arg = parts[1] if len(parts) > 1 else ""
 
-    # Normal /start bina kisi parameter ke
     if not raw_arg:
-        await bot.send_message(chat_id=chat_id, text="👋 Welcome! Kisi video link par click karke aayein to aapko video mil jayegi.")
+        await bot.send_message(chat_id=chat_id, text="👋 Welcome! Kisi video link par click karke aayein.")
         return
 
-    # Link arguments parse karna (Single file ya Batch format)
     extracted_args = raw_arg.split('_') if "_" in raw_arg else [raw_arg]
     if len(extracted_args) == 2 or len(extracted_args) == 4:
         if len(extracted_args) == 2:
@@ -64,16 +59,18 @@ async def start_with_text(update: Update, bot: ExtBot, text_message: str):
             target_ch = CHANNELS.get(str(ch_num))
             batch_size = math.ceil(len(video_list) / total_parts)
 
-        # Config error check agar channel missing ho
+        # 🛑 ERROR LOGGING TO LOG CHANNEL (If channel key is missing in Env)
         if not target_ch:
-            await bot.send_message(chat_id=chat_id, text=f"❌ Configuration Error: CH_{ch_num} is missing in Env variables!")
+            error_msg = f"❌ **ENV ERROR:**\nUser `{user_id}` requested `CH_{ch_num}`, but `CH_{ch_num}` is **NOT SET** in Vercel Environment Variables!"
+            try:
+                await bot.send_message(chat_id=LOG_GROUP_ID, text=error_msg, parse_mode="Markdown")
+            except: pass
+            await bot.send_message(chat_id=chat_id, text="❌ Technical issue (Config Missing). Admin has been notified.")
             return
 
-        # Target channel ke aage automatic -100 fix karna agar na ho
         if not str(target_ch).startswith("-100"):
             target_ch = f"-100{target_ch}"
 
-        # Current session config save karna
         user_data[user_id] = {
             "videos": video_list,
             "channel": target_ch,
@@ -83,8 +80,6 @@ async def start_with_text(update: Update, bot: ExtBot, text_message: str):
             "video_id": str(video_list[0])
         }
 
-        # DIRECT VIDEO DELIVERY (Bina kisi verification/shortener ke)
-        # Vercel timeout protection ke liye asyncio task background me run hoga
         asyncio.create_task(process_video_delivery(chat_id, bot, user_id, user))
 
 async def process_video_delivery(chat_id, bot: ExtBot, user_id, user):
@@ -93,7 +88,6 @@ async def process_video_delivery(chat_id, bot: ExtBot, user_id, user):
 
     data = user_data[user_id]
     
-    # Safe While loop to avoid infinite request retry in Vercel
     while data['current_index'] < len(data['videos']):
         start_idx = data['current_index']
         end_idx = start_idx + data['batch_size']
@@ -104,11 +98,24 @@ async def process_video_delivery(chat_id, bot: ExtBot, user_id, user):
             try:
                 await bot.copy_message(chat_id=chat_id, from_chat_id=data['channel'], message_id=msg_id)
                 videos_sent_successfully = True
-                await asyncio.sleep(0.6) # Flood protection limit
-            except Exception as e: 
-                logging.error(f"Error copying message {msg_id} from {data['channel']}: {e}")
+                await asyncio.sleep(0.6)
+            except Exception as telegram_error: 
+                logging.error(f"Error copying message {msg_id}: {telegram_error}")
+                
+                # 🛑 CRITICAL ERROR LOGGING TO LOG CHANNEL
+                # Agar video copy fail hoti hai, toh direct log channel par batayega kyun fail hua
+                try:
+                    err_message = (
+                        f"❌ **VIDEO DELIVERY FAILED!**\n\n"
+                        f"👤 **User:** {user.first_name} (`{user_id}`)\n"
+                        f"📁 **Source Channel:** `{data['channel']}`\n"
+                        f"🆔 **Target Message ID:** `{msg_id}`\n"
+                        f"⚠️ **Exact Telegram Error:** `{str(telegram_error)}`"
+                    )
+                    await bot.send_message(chat_id=LOG_GROUP_ID, text=err_message, parse_mode="Markdown")
+                except Exception as log_send_err:
+                    logging.error(f"Could not send error log: {log_send_err}")
 
-        # Log Channel mapping message sending logic
         if videos_sent_successfully and LOG_GROUP_ID:
             try:
                 ch_num = data.get("ch_num", "")
@@ -136,10 +143,9 @@ async def process_video_delivery(chat_id, bot: ExtBot, user_id, user):
 
     try:
         await bot.send_message(chat_id=chat_id, text="🎉 Saari videos complete ho gayi hain!")
-    except Exception as e:
-        logging.error(f"Failed to send completion message: {e}")
+    except:
+        pass
         
-    # User data clear out to keep memory lightweight
     if user_id in user_data:
         del user_data[user_id]
 
@@ -147,7 +153,7 @@ async def process_video_delivery(chat_id, bot: ExtBot, user_id, user):
 app = Flask(__name__)
 
 @app.route('/')
-def home(): return "Bot is Active! No Verification Engine Installed."
+def home(): return "Bot is Active! Debug Mode ON."
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
@@ -161,7 +167,7 @@ def webhook():
                 if update.message.text.startswith('/start'):
                     asyncio.run(start_with_text(update, bot, update.message.text))
             
-            return "OK", 200 # Instant response Vercel webhook engine ko trigger retry se rokega
+            return "OK", 200
         except Exception as e:
             logging.error(f"Webhook Error: {e}")
             return "OK", 200

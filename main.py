@@ -32,32 +32,40 @@ CHANNELS = {
 
 user_data = {}
 
+# 3 API loop configs (Index: 0=arolinks, 1=vplink, 2=instantlinks)
 API_CONFIGS = [
-    {"name": "arolinks", "url": "https://arolinks.com/api?api=f4617908b561110a219cd2b65bc255c2c2c6ff8a&url={url}"},
-    {"name": "vplink", "url": "https://vplink.in/api?api=017ab25e4402465d00047e8e2897f3c6b38afbd9&url={url}"},
-    {"name": "instantlinks", "url": "https://instantlinks.co/api?api=323c4585c0d0b8bc04a170cd57a2e6a74ac6d8aa&url={url}"}
+    {"name": "Arolinks", "url": "https://arolinks.com/api?api=f4617908b561110a219cd2b65bc255c2c2c6ff8a&url={url}"},
+    {"name": "Vplink", "url": "https://vplink.in/api?api=017ab25e4402465d00047e8e2897f3c6b38afbd9&url={url}"},
+    {"name": "Instantlinks", "url": "https://instantlinks.co/api?api=323c4585c0d0b8bc04a170cd57a2e6a74ac6d8aa&url={url}"}
 ]
 
 # --- HELPER FUNCTIONS ---
 def check_verification(user_id):
+    """Checks if the user is currently verified and within the 8-hour window."""
     user = users_collection.find_one({"_id": int(user_id)})
     if user:
         expiry = user.get("expiry")
+        # Agar expiry time save hai aur current time se bada hai, toh user verified hai
         if expiry and datetime.utcnow() < expiry:
             if user.get("status") == "verify":
                 return True
     return False
 
-def get_shortlink(url):
-    # Arolinks api se url short karne ke liye function
+def get_shortlink(api_index, destination_url):
+    """Generates shortlink dynamically based on current API rotation index."""
     try:
-        api_url = API_CONFIGS[0]["url"].format(url=url)
+        config = API_CONFIGS[api_index]
+        api_url = config["url"].format(url=destination_url)
         response = requests.get(api_url).json()
+        
+        # Checking successful response formats for standard shorteners
         if response.get("status") == "success":
             return response.get("shortenedUrl")
+        elif "shortenedUrl" in response:
+            return response["shortenedUrl"]
     except Exception as e:
-        logging.error(f"Error generating shortlink: {e}")
-    return url
+        logging.error(f"Error generating shortlink from {API_CONFIGS[api_index]['name']}: {e}")
+    return destination_url
 
 # --- BOT LOGIC FUNCTIONS ---
 async def start_with_text(update: Update, bot: ExtBot, text_message: str):
@@ -66,56 +74,125 @@ async def start_with_text(update: Update, bot: ExtBot, text_message: str):
     
     user = update.effective_user
     user_id = int(user.id)
+    chat_id = update.message.chat_id
+    
     parts = text_message.split()
     raw_arg = parts[1] if len(parts) > 1 else ""
 
+    bot_username = (await bot.get_me()).username
+
+    # CASE 1: Normal Start without any arguments
     if not raw_arg:
-        await bot.send_message(chat_id=update.message.chat_id, text="👋 Welcome! Bot active hai.")
+        await bot.send_message(chat_id=chat_id, text="👋 Welcome! Kuch download karne ke liye link par click karein.")
         return
 
-    extracted_args = raw_arg.split('_') if "_" in raw_arg else [raw_arg]
-    if len(extracted_args) == 2:
-        file_id, ch_num = extracted_args
-        video_list = [int(file_id)]
-        target_ch = CHANNELS.get(str(ch_num))
-        batch_size = 1
-    elif len(extracted_args) == 4:
-        start_id, end_id, ch_num, total_parts = map(int, extracted_args)
-        video_list = list(range(start_id, end_id + 1))
-        target_ch = CHANNELS.get(str(ch_num))
-        batch_size = math.ceil(len(video_list) / total_parts)
-    else:
-        return
-
-    user_data[user_id] = {
-        "videos": video_list,
-        "channel": target_ch,
-        "batch_size": batch_size,
-        "current_index": 0
-    }
-
-    # MongoDB me verification status check ho rhi hai
-    is_verified = check_verification(user_id)
-    
-    if is_verified:
-        # User verified hai -> Direct video send hogi
-        await process_video_delivery(update, bot, user_id, user)
-    else:
-        # User verified nahi hai -> Arolink ka button milega
-        bot_username = (await bot.get_me()).username
-        # Verification complete hone ke baad user isi command par wapas aaye uske liye link generate ho rha hai
-        verification_redirect_url = f"https://t.me/{bot_username}?start={raw_arg}"
-        short_link = get_shortlink(verification_redirect_url)
-
-        keyboard = [
-            [InlineKeyboardButton("🔐 Verify via Arolinks", url=short_link)]
-        ]
+    # CASE 2: User successfully verified hokar shortlink se wapas aaya hai
+    if raw_arg.startswith("verify_"):
+        token = raw_arg.split("_")[1]
         
-        msg_text = (
-            "⚠️ **Verification Required!**\n\n"
-            "Aap verified nahi hain. Videos paane ke liye niche diye gaye button par click karke verify karein."
-        )
-        await bot.send_message(chat_id=update.message.chat_id, text=msg_text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
+        # Database me token check karo aur status update karo
+        db_user = users_collection.find_one({"_id": user_id, "current_token": token})
+        if db_user:
+            now = datetime.utcnow()
+            expiry_time = now + timedelta(hours=8)
+            
+            # Next loop rotation determine karo (0 -> 1 -> 2 -> 0)
+            current_index = db_user.get("api_index", 0)
+            next_index = (current_index + 1) % len(API_CONFIGS)
+            
+            # Data update in DB (Optimized space saving strategy)
+            users_collection.update_one(
+                {"_id": user_id},
+                {
+                    "$set": {
+                        "status": "verify",
+                        "expiry": expiry_time,
+                        "api_index": next_index,
+                        "time_log": now.strftime("%H:%M:%S")
+                    },
+                    "$unset": {"current_token": ""} # Token use ho gaya toh delete kar do
+                }
+            )
+            
+            # Agar verification ke pehle kisi video file ki request hold par thi, toh process karo
+            saved_arg = db_user.get("pending_arg")
+            if saved_arg:
+                # Wapas recursion trigger karo updated argument ke sath taaki video delivery start ho sake
+                await start_with_text(update, bot, f"/start {saved_arg}")
+            else:
+                await bot.send_message(chat_id=chat_id, text="✅ Verification Successful! Aap agle 8 ghante ke liye verified hain.")
+        else:
+            await bot.send_message(chat_id=chat_id, text="❌ Invalid ya Expired Verification Link! Kripya dobara try karein.")
+        return
+
+    # CASE 3: User ne video file query hit ki hai (?start=8607_2 ya batch link)
+    extracted_args = raw_arg.split('_') if "_" in raw_arg else [raw_arg]
+    if len(extracted_args) == 2 or len(extracted_args) == 4:
+        # Arguments mapping handles variables locally
+        if len(extracted_args) == 2:
+            file_id, ch_num = extracted_args
+            video_list = [int(file_id)]
+            target_ch = CHANNELS.get(str(ch_num))
+            batch_size = 1
+        else:
+            start_id, end_id, ch_num, total_parts = map(int, extracted_args)
+            video_list = list(range(start_id, end_id + 1))
+            target_ch = CHANNELS.get(str(ch_num))
+            batch_size = math.ceil(len(video_list) / total_parts)
+
+        # Temporary in-memory session update for current session
+        user_data[user_id] = {
+            "videos": video_list,
+            "channel": target_ch,
+            "batch_size": batch_size,
+            "current_index": 0
+        }
+
+        # Check DB to see if 8-hours slot is valid
+        is_verified = check_verification(user_id)
+        
+        if is_verified:
+            # User verified hai -> Direct video delivery run hogi
+            await process_video_delivery(update, bot, user_id, user)
+        else:
+            # User unverified ya expired hai -> Fetch rotation schema
+            db_user = users_collection.find_one({"_id": user_id})
+            api_index = db_user.get("api_index", 0) if db_user else 0
+            
+            # Ek unpredictable secure token generate kijiye
+            secure_token = uuid.uuid4().hex[:12]
+            
+            # DB entry structure to minimum bytes for free-tier compatibility
+            users_collection.update_one(
+                {"_id": user_id},
+                {
+                    "$set": {
+                        "status": "unverified",
+                        "current_token": secure_token,
+                        "pending_arg": raw_arg, # Video configuration logic backup
+                        "api_index": api_index
+                    }
+                },
+                upsert=True
+            )
+            
+            # Redirect payload jab shortener se pass hokar user link open karega
+            destination_link = f"https://t.me/{bot_username}?start=verify_{secure_token}"
+            short_link = get_shortlink(api_index, destination_link)
+            
+            api_name = API_CONFIGS[api_index]["name"]
+            keyboard = [
+                [InlineKeyboardButton(f"🔐 Verify via {api_name}", url=short_link)]
+            ]
+            
+            msg_text = (
+                "⚠️ **Verification Required!**\n\n"
+                f"Aapka verification session expire ho chuka hai ya aap new user hain. "
+                f"Videos pane ke liye neeche diye gaye link se **{api_name}** verify karein. "
+                "Yeh sirf 8 ghante ke liye valid rahega."
+            )
+            await bot.send_message(chat_id=chat_id, text=msg_text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
+
 
 async def process_video_delivery(update, bot: ExtBot, user_id, user):
     if user_id not in user_data:
@@ -156,7 +233,6 @@ async def process_video_delivery(update, bot: ExtBot, user_id, user):
 
     user_data[user_id]['current_index'] = end_idx
     if end_idx < len(data['videos']):
-        # Agar aage aur videos hain toh bina kisi timer ke agla batch bhejega (Kyunki user already verified hai)
         await process_video_delivery(update, bot, user_id, user)
     else:
         await bot.send_message(chat_id=chat_id, text="🎉 Saari videos complete ho gayi hain!")

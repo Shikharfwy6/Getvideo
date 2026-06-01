@@ -45,7 +45,6 @@ def check_verification(user_id):
     user = users_collection.find_one({"_id": int(user_id)})
     if user:
         expiry = user.get("expiry")
-        # Agar expiry time save hai aur current time se bada hai, toh user verified hai
         if expiry and datetime.utcnow() < expiry:
             if user.get("status") == "verify":
                 return True
@@ -58,7 +57,6 @@ def get_shortlink(api_index, destination_url):
         api_url = config["url"].format(url=destination_url)
         response = requests.get(api_url).json()
         
-        # Checking successful response formats for standard shorteners
         if response.get("status") == "success":
             return response.get("shortenedUrl")
         elif "shortenedUrl" in response:
@@ -90,17 +88,14 @@ async def start_with_text(update: Update, bot: ExtBot, text_message: str):
     if raw_arg.startswith("verify_"):
         token = raw_arg.split("_")[1]
         
-        # Database me token check karo aur status update karo
         db_user = users_collection.find_one({"_id": user_id, "current_token": token})
         if db_user:
             now = datetime.utcnow()
             expiry_time = now + timedelta(hours=8)
             
-            # Next loop rotation determine karo (0 -> 1 -> 2 -> 0)
             current_index = db_user.get("api_index", 0)
             next_index = (current_index + 1) % len(API_CONFIGS)
             
-            # Data update in DB (Optimized space saving strategy)
             users_collection.update_one(
                 {"_id": user_id},
                 {
@@ -110,14 +105,12 @@ async def start_with_text(update: Update, bot: ExtBot, text_message: str):
                         "api_index": next_index,
                         "time_log": now.strftime("%H:%M:%S")
                     },
-                    "$unset": {"current_token": ""} # Token use ho gaya toh delete kar do
+                    "$unset": {"current_token": ""}
                 }
             )
             
-            # Agar verification ke pehle kisi video file ki request hold par thi, toh process karo
             saved_arg = db_user.get("pending_arg")
             if saved_arg:
-                # Wapas recursion trigger karo updated argument ke sath taaki video delivery start ho sake
                 await start_with_text(update, bot, f"/start {saved_arg}")
             else:
                 await bot.send_message(chat_id=chat_id, text="✅ Verification Successful! Aap agle 8 ghante ke liye verified hain.")
@@ -128,7 +121,6 @@ async def start_with_text(update: Update, bot: ExtBot, text_message: str):
     # CASE 3: User ne video file query hit ki hai (?start=8607_2 ya batch link)
     extracted_args = raw_arg.split('_') if "_" in raw_arg else [raw_arg]
     if len(extracted_args) == 2 or len(extracted_args) == 4:
-        # Arguments mapping handles variables locally
         if len(extracted_args) == 2:
             file_id, ch_num = extracted_args
             video_list = [int(file_id)]
@@ -140,43 +132,38 @@ async def start_with_text(update: Update, bot: ExtBot, text_message: str):
             target_ch = CHANNELS.get(str(ch_num))
             batch_size = math.ceil(len(video_list) / total_parts)
 
-        # Temporary in-memory session update for current session
+        # Yahan 'start_arg' ko save kiya hai taaki log channel me use kiya ja sake
         user_data[user_id] = {
             "videos": video_list,
             "channel": target_ch,
             "batch_size": batch_size,
-            "current_index": 0
+            "current_index": 0,
+            "start_arg": raw_arg 
         }
 
-        # Check DB to see if 8-hours slot is valid
         is_verified = check_verification(user_id)
         
         if is_verified:
-            # User verified hai -> Direct video delivery run hogi
             await process_video_delivery(update, bot, user_id, user)
         else:
-            # User unverified ya expired hai -> Fetch rotation schema
             db_user = users_collection.find_one({"_id": user_id})
             api_index = db_user.get("api_index", 0) if db_user else 0
             
-            # Ek unpredictable secure token generate kijiye
             secure_token = uuid.uuid4().hex[:12]
             
-            # DB entry structure to minimum bytes for free-tier compatibility
             users_collection.update_one(
                 {"_id": user_id},
                 {
                     "$set": {
                         "status": "unverified",
                         "current_token": secure_token,
-                        "pending_arg": raw_arg, # Video configuration logic backup
+                        "pending_arg": raw_arg,
                         "api_index": api_index
                     }
                 },
                 upsert=True
             )
             
-            # Redirect payload jab shortener se pass hokar user link open karega
             destination_link = f"https://t.me/{bot_username}?start=verify_{secure_token}"
             short_link = get_shortlink(api_index, destination_link)
             
@@ -214,9 +201,16 @@ async def process_video_delivery(update, bot: ExtBot, user_id, user):
         except Exception as e: 
             logging.error(e)
 
-    # LOG CHANNEL LOGIC
+    # LOG CHANNEL LOGIC WITH DIRECT LINK
     if videos_sent_successfully and LOG_GROUP_ID:
         try:
+            bot_info = await bot.get_me()
+            bot_username = bot_info.username
+            start_arg = data.get("start_arg", "")
+            
+            # Direct link generate kiya user ke content ka
+            video_link = f"https://t.me/{bot_username}?start={start_arg}" if start_arg else "N/A"
+            
             first_name = user.first_name or "User"
             username = f"@{user.username}" if user.username else "No Username"
             log_message = (
@@ -225,9 +219,10 @@ async def process_video_delivery(update, bot: ExtBot, user_id, user):
                 f"🆔 **ID:** `{user_id}`\n"
                 f"🌐 **Username:** {username}\n"
                 f"📦 **Batch:** {start_idx + 1} to {min(end_idx, len(data['videos']))}\n"
+                f"🔗 **Video Link:** [Click Here]({video_link})\n"
                 f"⏰ **Time:** {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')} UTC"
             )
-            await bot.send_message(chat_id=LOG_GROUP_ID, text=log_message, parse_mode="Markdown")
+            await bot.send_message(chat_id=LOG_GROUP_ID, text=log_message, parse_mode="Markdown", disable_web_page_preview=True)
         except Exception as log_err:
             logging.error(f"Log Channel Error: {log_err}")
 

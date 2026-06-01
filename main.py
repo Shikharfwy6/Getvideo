@@ -4,6 +4,7 @@ import asyncio
 import math
 import uuid
 import requests
+import traceback
 from datetime import datetime, timedelta
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ExtBot
@@ -72,113 +73,128 @@ def get_shortlink(api_index, destination_url):
 
 # --- BOT LOGIC FUNCTIONS ---
 async def start_with_text(update: Update, bot: ExtBot, text_message: str):
-    if not update.message:
-        return
-    
     user = update.effective_user
-    user_id = int(user.id)
-    chat_id = update.message.chat_id
-    
-    parts = text_message.split()
-    raw_arg = parts[1] if len(parts) > 1 else ""
+    user_id = int(user.id) if user else 0
+    chat_id = update.message.chat_id if update.message else 0
     
     try:
-        bot_info = await bot.get_me()
-        bot_username = bot_info.username
-    except Exception as e:
-        logging.error(f"Failed to get bot info: {e}")
-        bot_username = "Getvideo81827_bot"
-
-    if not raw_arg:
-        await bot.send_message(chat_id=chat_id, text="👋 Welcome! Kuch download karne ke liye link par click karein.")
-        return
-
-    # CASE 1: Verification Callback Handling
-    if raw_arg.startswith("verify_"):
-        token = raw_arg.split("_")[1]
-        db_user = users_collection.find_one({"_id": user_id, "current_token": token})
+        if not update.message:
+            return
         
-        if db_user:
-            now = datetime.utcnow()
-            expiry_time = now + timedelta(hours=8)
-            current_index = db_user.get("api_index", 0)
-            next_index = (current_index + 1) % len(API_CONFIGS)
-            
-            users_collection.update_one(
-                {"_id": user_id},
-                {
-                    "$set": {
-                        "status": "verify",
-                        "expiry": expiry_time,
-                        "api_index": next_index,
-                        "time_log": now.strftime("%H:%M:%S")
-                    },
-                    "$unset": {"current_token": ""}
-                }
-            )
-            
-            saved_arg = db_user.get("pending_arg")
-            if saved_arg:
-                await bot.send_message(chat_id=chat_id, text="✅ Verification Successful! Videos send ho rahi hain...")
-                await start_with_text(update, bot, f"/start {saved_arg}")
-            else:
-                await bot.send_message(chat_id=chat_id, text="✅ Verification Successful! Aap agle 8 ghante ke liye verified hain.")
-        else:
-            await bot.send_message(chat_id=chat_id, text="❌ Invalid ya Expired Verification Link! Kripya dobara try karein.")
-        return
+        parts = text_message.split()
+        raw_arg = parts[1] if len(parts) > 1 else ""
+        
+        try:
+            bot_info = await bot.get_me()
+            bot_username = bot_info.username
+        except Exception as e:
+            logging.error(f"Failed to get bot info: {e}")
+            bot_username = "Getvideo81827_bot"
 
-    # CASE 2: Video Query Processing System
-    extracted_args = raw_arg.split('_') if "_" in raw_arg else [raw_arg]
-    if len(extracted_args) == 2 or len(extracted_args) == 4:
-        if len(extracted_args) == 2:
-            file_id, ch_num = extracted_args
-            video_list = [int(file_id)]
-            target_ch = CHANNELS.get(str(ch_num))
-            batch_size = 1
-        else:
-            start_id, end_id, ch_num, total_parts = map(int, extracted_args)
-            video_list = list(range(start_id, end_id + 1))
-            target_ch = CHANNELS.get(str(ch_num))
-            batch_size = math.ceil(len(video_list) / total_parts)
-
-        if not target_ch:
-            await bot.send_message(chat_id=chat_id, text=f"❌ Configuration Error: CH_{ch_num} galat hai ya found nahi hua!")
+        if not raw_arg:
+            await bot.send_message(chat_id=chat_id, text="👋 Welcome! Kuch download karne ke liye link par click karein.")
             return
 
-        is_verified = check_verification(user_id)
-        
-        if is_verified:
-            await process_video_delivery_sync(chat_id, bot, user_id, user, video_list, target_ch, batch_size, ch_num)
-        else:
-            db_user = users_collection.find_one({"_id": user_id})
-            api_index = db_user.get("api_index", 0) if db_user else 0
-            secure_token = uuid.uuid4().hex[:12]
+        # CASE 1: Verification Callback Handling
+        if raw_arg.startswith("verify_"):
+            token = raw_arg.split("_")[1]
+            db_user = users_collection.find_one({"_id": user_id, "current_token": token})
             
-            users_collection.update_one(
-                {"_id": user_id},
-                {
-                    "$set": {
-                        "status": "unverified",
-                        "current_token": secure_token,
-                        "pending_arg": raw_arg,
-                        "api_index": api_index
+            if db_user:
+                now = datetime.utcnow()
+                expiry_time = now + timedelta(hours=8)
+                current_index = db_user.get("api_index", 0)
+                next_index = (current_index + 1) % len(API_CONFIGS)
+                
+                users_collection.update_one(
+                    {"_id": user_id},
+                    {
+                        "$set": {
+                            "status": "verify",
+                            "expiry": expiry_time,
+                            "api_index": next_index,
+                            "time_log": now.strftime("%H:%M:%S")
+                        },
+                        "$unset": {"current_token": ""}
                     }
-                },
-                upsert=True
-            )
+                )
+                
+                saved_arg = db_user.get("pending_arg")
+                if saved_arg:
+                    await bot.send_message(chat_id=chat_id, text="✅ Verification Successful! Videos send ho rahi hain...")
+                    await start_with_text(update, bot, f"/start {saved_arg}")
+                else:
+                    await bot.send_message(chat_id=chat_id, text="✅ Verification Successful! Aap agle 8 ghante ke liye verified hain.")
+            else:
+                await bot.send_message(chat_id=chat_id, text="❌ Invalid ya Expired Verification Link! Kripya dobara try karein.")
+            return
+
+        # CASE 2: Video Query Processing System
+        extracted_args = raw_arg.split('_') if "_" in raw_arg else [raw_arg]
+        if len(extracted_args) == 2 or len(extracted_args) == 4:
+            if len(extracted_args) == 2:
+                file_id, ch_num = extracted_args
+                video_list = [int(file_id)]
+                target_ch = CHANNELS.get(str(ch_num))
+                batch_size = 1
+            else:
+                start_id, end_id, ch_num, total_parts = map(int, extracted_args)
+                video_list = list(range(start_id, end_id + 1))
+                target_ch = CHANNELS.get(str(ch_num))
+                batch_size = math.ceil(len(video_list) / total_parts)
+
+            if not target_ch:
+                await bot.send_message(chat_id=chat_id, text=f"❌ Configuration Error: CH_{ch_num} galat hai ya found nahi hua!")
+                return
+
+            is_verified = check_verification(user_id)
             
-            destination_link = f"https://t.me/{bot_username}?start=verify_{secure_token}"
-            short_link = get_shortlink(api_index, destination_link)
-            api_name = API_CONFIGS[api_index]["name"]
-            
-            keyboard = [[InlineKeyboardButton(f"🔐 Verify via {api_name}", url=short_link)]]
-            msg_text = (
-                "⚠️ **सत्यापन आवश्यक Verification Required!**\n\n"
-                f"आपका वेरिफिकेशन सेशन समाप्त हो चुका है। "
-                f"वीडियो पाने के लिए नीचे दिए गए बटन पर क्लिक करके **{api_name}** से वेरीफाई करें। "
-                "यह सिर्फ 8 घंटे के लिए मान्य रहेगा।"
-            )
-            await bot.send_message(chat_id=chat_id, text=msg_text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
+            if is_verified:
+                await process_video_delivery_sync(chat_id, bot, user_id, user, video_list, target_ch, batch_size, ch_num)
+            else:
+                db_user = users_collection.find_one({"_id": user_id})
+                api_index = db_user.get("api_index", 0) if db_user else 0
+                secure_token = uuid.uuid4().hex[:12]
+                
+                users_collection.update_one(
+                    {"_id": user_id},
+                    {
+                        "$set": {
+                            "status": "unverified",
+                            "current_token": secure_token,
+                            "pending_arg": raw_arg,
+                            "api_index": api_index
+                        }
+                    },
+                    upsert=True
+                )
+                
+                destination_link = f"https://t.me/{bot_username}?start=verify_{secure_token}"
+                short_link = get_shortlink(api_index, destination_link)
+                api_name = API_CONFIGS[api_index]["name"]
+                
+                keyboard = [[InlineKeyboardButton(f"🔐 Verify via {api_name}", url=short_link)]]
+                msg_text = (
+                    "⚠️ **सत्यापन आवश्यक Verification Required!**\n\n"
+                    f"आपका वेरिफिकेशन सेशन समाप्त हो चुका है। "
+                    f"वीडियो पाने के लिए नीचे दिए गए बटन पर击 करके **{api_name}** से वेरीफाई करें। "
+                    "यह सिर्फ 8 घंटे के लिए मान्य रहेगा।"
+                )
+                await bot.send_message(chat_id=chat_id, text=msg_text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
+
+    except Exception as start_err:
+        logging.error(f"Error in start_with_text: {start_err}")
+        if LOG_GROUP_ID:
+            try:
+                err_trace = traceback.format_exc()[-1500:]  # Limit to avoid telegram length limit
+                err_msg = (
+                    f"🚨 **CRITICAL ERROR IN START LOGIC!**\n\n"
+                    f"👤 **User:** `{user_id}`\n"
+                    f"💬 **Command:** `{text_message}`\n\n"
+                    f"⚠️ **Traceback:**\n`{err_trace}`"
+                )
+                await bot.send_message(chat_id=LOG_GROUP_ID, text=err_msg, parse_mode="Markdown")
+            except: pass
 
 async def process_video_delivery_sync(chat_id, bot: ExtBot, user_id, user, video_list, target_ch, batch_size, ch_num):
     current_index = 0
@@ -236,15 +252,8 @@ async def process_video_delivery_sync(chat_id, bot: ExtBot, user_id, user, video
         await bot.send_message(chat_id=chat_id, text="🎉 Saari videos complete ho gayi hain!")
     except: pass
 
-# --- FLASK SERVER & WEBHOOK (FIXED FOR PTB v20+) ---
+# --- FLASK SERVER & WEBHOOK (VERCEL OPTIMIZED + AUTO LOGGING) ---
 app = Flask(__name__)
-
-# Global runtime loop create/fetch karna
-try:
-    loop = asyncio.get_event_loop()
-except RuntimeError:
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
 
 @app.route('/')
 def home(): 
@@ -253,24 +262,37 @@ def home():
 @app.route('/webhook', methods=['POST'])
 def webhook():
     if request.method == "POST":
+        bot = ExtBot(token=TOKEN)
         try:
             update_json = request.get_json(force=True)
-            bot = ExtBot(token=TOKEN)
             update = Update.de_json(update_json, bot)
             
             if update and update.message and update.message.text:
                 if update.message.text.startswith('/start'):
-                    # Async execution context ko Flask main thread ke sath map karne ke liye
-                    loop.run_until_complete(start_with_text(update, bot, update.message.text))
+                    # Vercel engine ke liye clean standalone run
+                    asyncio.run(start_with_text(update, bot, update.message.text))
             
             return "OK", 200
-        except Exception as e:
-            logging.error(f"Execution Error in Webhook: {e}")
-            return "Internal Server Error", 500
+        except Exception as main_err:
+            logging.error(f"Global Webhook Crash: {main_err}")
+            if LOG_GROUP_ID:
+                try:
+                    full_trace = traceback.format_exc()[-1500:]
+                    alert_msg = (
+                        f"💥 **WEBHOOK GLOBAL CRASH ALERT!**\n\n"
+                        f"⚠️ **Error Message:** `{str(main_err)}`\n\n"
+                        f"📊 **Full Stack Trace:**\n`{full_trace}`"
+                    )
+                    # Sync message delivery to channel during emergency crash
+                    asyncio.run(bot.send_message(chat_id=LOG_GROUP_ID, text=alert_msg, parse_mode="Markdown"))
+                except Exception as log_send_err:
+                    logging.error(f"Failed to send alert to log channel: {log_send_err}")
+            
+            # 200 OK dena zaroori hai taaki loop block na ho
+            return "OK", 200
             
     return "Method Not Allowed", 405
 
 if __name__ == '__main__':
-    # Local debugging ke liye port automatic manage hogi
     port = int(os.environ.get("PORT", 5000))
     app.run(host='0.0.0.0', port=port)

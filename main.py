@@ -48,26 +48,31 @@ API_CONFIGS = [
 
 # --- HELPER FUNCTIONS ---
 def check_verification(user_id):
-    user = users_collection.find_one({"_id": int(user_id)})
-    if user:
-        expiry = user.get("expiry")
-        if expiry and datetime.utcnow() < expiry:
-            if user.get("status") == "verify":
-                return True
+    try:
+        user = users_collection.find_one({"_id": int(user_id)})
+        if user:
+            expiry = user.get("expiry")
+            if expiry and datetime.utcnow() < expiry:
+                if user.get("status") == "verify":
+                    return True
+    except Exception as e:
+        logging.error(f"Database check error: {e}")
     return False
 
 def get_shortlink(api_index, destination_url):
+    """Generates shortlink safely. Falls back to direct link if API fails."""
     try:
         config = API_CONFIGS[api_index]
         api_url = config["url"].format(url=destination_url)
-        response = requests.get(api_url).json()
+        response = requests.get(api_url, timeout=7).json() # Added timeout to prevent hanging
+        
         if response.get("status") == "success":
             return response.get("shortenedUrl")
         elif "shortenedUrl" in response:
             return response["shortenedUrl"]
     except Exception as e:
-        logging.error(f"Error generating shortlink from {API_CONFIGS[api_index]['name']}: {e}")
-    return destination_url
+        logging.error(f"Shortener API failed for {API_CONFIGS[api_index]['name']}: {e}")
+    return destination_url # Fallback: return normal link if shortener crashes
 
 # --- BOT LOGIC FUNCTIONS ---
 async def start_with_text(update: Update, bot: ExtBot, text_message: str):
@@ -80,12 +85,19 @@ async def start_with_text(update: Update, bot: ExtBot, text_message: str):
     
     parts = text_message.split()
     raw_arg = parts[1] if len(parts) > 1 else ""
-    bot_username = (await bot.get_me()).username
+    
+    try:
+        bot_info = await bot.get_me()
+        bot_username = bot_info.username
+    except Exception as e:
+        logging.error(f"Failed to get bot info: {e}")
+        bot_username = "Getvideo81827_bot"
 
     if not raw_arg:
         await bot.send_message(chat_id=chat_id, text="👋 Welcome! Kuch download karne ke liye link par click karein.")
         return
 
+    # CASE 1: Verification Callback handling
     if raw_arg.startswith("verify_"):
         token = raw_arg.split("_")[1]
         db_user = users_collection.find_one({"_id": user_id, "current_token": token})
@@ -117,6 +129,7 @@ async def start_with_text(update: Update, bot: ExtBot, text_message: str):
             await bot.send_message(chat_id=chat_id, text="❌ Invalid ya Expired Verification Link! Kripya dobara try karein.")
         return
 
+    # CASE 2: Video Query Link handling
     extracted_args = raw_arg.split('_') if "_" in raw_arg else [raw_arg]
     if len(extracted_args) == 2 or len(extracted_args) == 4:
         if len(extracted_args) == 2:
@@ -130,6 +143,15 @@ async def start_with_text(update: Update, bot: ExtBot, text_message: str):
             target_ch = CHANNELS.get(str(ch_num))
             batch_size = math.ceil(len(video_list) / total_parts)
 
+        # Secure parsing check for missing configurations
+        if not target_ch:
+            await bot.send_message(chat_id=chat_id, text=f"❌ Configuration Error: CH_{ch_num} is missing in Env setup!")
+            return
+
+        # Auto format check for missing prefix chat IDs
+        if not str(target_ch).startswith("-100"):
+            target_ch = f"-100{target_ch}"
+
         user_data[user_id] = {
             "videos": video_list,
             "channel": target_ch,
@@ -142,7 +164,6 @@ async def start_with_text(update: Update, bot: ExtBot, text_message: str):
         is_verified = check_verification(user_id)
         
         if is_verified:
-            # Vercel timeout se bachne ke liye background task me run karein
             asyncio.create_task(process_video_delivery(chat_id, bot, user_id, user))
         else:
             db_user = users_collection.find_one({"_id": user_id})
@@ -180,7 +201,6 @@ async def process_video_delivery(chat_id, bot: ExtBot, user_id, user):
 
     data = user_data[user_id]
     
-    # Infinite recursion hatane ke liye loop ka use kiya gaya hai
     while data['current_index'] < len(data['videos']):
         start_idx = data['current_index']
         end_idx = start_idx + data['batch_size']
@@ -189,13 +209,13 @@ async def process_video_delivery(chat_id, bot: ExtBot, user_id, user):
         videos_sent_successfully = False
         for msg_id in current_batch:
             try:
+                # Target channel dynamic check ensures copy is seamless
                 await bot.copy_message(chat_id=chat_id, from_chat_id=data['channel'], message_id=msg_id)
                 videos_sent_successfully = True
-                await asyncio.sleep(0.6) # Anti-flood delay thoda badhaya verna Telegram block kar dega
+                await asyncio.sleep(0.6) 
             except Exception as e: 
-                logging.error(f"Error copying message {msg_id}: {e}")
+                logging.error(f"Error copying message {msg_id} from {data['channel']}: {e}")
 
-        # LOG CHANNEL LOGIC
         if videos_sent_successfully and LOG_GROUP_ID:
             try:
                 ch_num = data.get("ch_num", "")
@@ -218,14 +238,14 @@ async def process_video_delivery(chat_id, bot: ExtBot, user_id, user):
             except Exception as log_err:
                 logging.error(f"Log Channel Error: {log_err}")
 
-        # Index ko badhayein agle loop ke liye
         data['current_index'] = end_idx
-        
-        # Ek batch complete hone ke baad small pause taaki server freeze na ho
         await asyncio.sleep(1)
 
-    # Jab saari videos khatam ho jayein loop se tabhi final message jaye
-    await bot.send_message(chat_id=chat_id, text="🎉 Saari videos complete ho gayi hain!")
+    try:
+        await bot.send_message(chat_id=chat_id, text="🎉 Saari videos complete ho gayi hain!")
+    except Exception as e:
+        logging.error(f"Failed to send completion message: {e}")
+        
     if user_id in user_data:
         del user_data[user_id]
 
@@ -245,10 +265,9 @@ def webhook():
             
             if update.message and update.message.text:
                 if update.message.text.startswith('/start'):
-                    # Flask ko jaldi return mil sake isliye yahan execute ho raha hai
                     asyncio.run(start_with_text(update, bot, update.message.text))
             
-            return "OK", 200 # Vercel ko turant return 200 dega taaki dubara retry hit na ho
+            return "OK", 200 
         except Exception as e:
             logging.error(f"Webhook Error: {e}")
             return "OK", 200

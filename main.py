@@ -5,30 +5,23 @@ import asyncio
 import math
 import uuid
 import requests
-from datetime import datetime
+from datetime import datetime, timedelta
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import ExtBot
+from telegram.ext import CallbackContext, ExtBot
 from flask import Flask, request
 from pymongo import MongoClient
 
 # --- CONFIG & LOGGING ---
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logging.basicConfig(level=logging.INFO)
 TOKEN = os.getenv("BOT_TOKEN")
 MONETAG_LINK = os.getenv("MONETAG_DIRECT_LINK") or "https://google.com"
 LOG_GROUP_ID = os.getenv("LOG_GROUP_ID") 
 MONGO_URI = os.getenv("MONGO_URI")
 
-# MongoDB Setup & Connection Test
-try:
-    logging.info("Connecting to MongoDB...")
-    mongo_client = MongoClient(MONGO_URI, serverSelectionTimeoutMS=5000)
-    db = mongo_client['TelegramBotDB']
-    users_collection = db['users']
-    # Test connection
-    mongo_client.server_info()
-    logging.info("✅ MongoDB Connected Successfully!")
-except Exception as e:
-    logging.critical(f"❌ MongoDB Connection Failed: {e}")
+# MongoDB Setup
+mongo_client = MongoClient(MONGO_URI)
+db = mongo_client['TelegramBotDB']
+users_collection = db['users']
 
 CHANNELS = {
     "1": os.getenv("CH_1"),
@@ -54,8 +47,6 @@ async def start_with_text(update: Update, bot: ExtBot, text_message: str):
         await bot.send_message(chat_id=update.message.chat_id, text="👋 Welcome! Bot active hai.")
         return
 
-    logging.info(f"User {user_id} started bot with args: {raw_arg}")
-
     extracted_args = raw_arg.split('_') if "_" in raw_arg else [raw_arg]
     if len(extracted_args) == 2:
         file_id, ch_num = extracted_args
@@ -68,10 +59,8 @@ async def start_with_text(update: Update, bot: ExtBot, text_message: str):
         target_ch = CHANNELS.get(str(ch_num))
         batch_size = math.ceil(len(video_list) / total_parts)
     else:
-        logging.warning(f"Invalid arguments format from user {user_id}")
         return
 
-    # Temporary Session Setup
     user_data[user_id] = {
         "videos": video_list,
         "channel": target_ch,
@@ -80,27 +69,13 @@ async def start_with_text(update: Update, bot: ExtBot, text_message: str):
         "click_time": 0,
         "ad_clicked": False
     }
-
-    # 🔍 MONGO CHECK (Safe Sync Fetch)
-    existing_user = None
-    try:
-        existing_user = users_collection.find_one({"user_id": user_id})
-        logging.info(f"DB Check for {user_id}: {existing_user}")
-    except Exception as db_err:
-        logging.error(f"Error fetching from MongoDB: {db_err}")
-    
-    if existing_user and existing_user.get("is_verified", False):
-        logging.info(f"User {user_id} is already verified in DB. Delivering videos directly.")
-        await process_video_delivery(update, bot, user_id, user, is_callback=False)
-    else:
-        logging.info(f"User {user_id} not verified or data deleted. Sending ad verification.")
-        await send_ad_step_fixed(update, bot, user_id)
+    await send_ad_step_fixed(update, bot, user_id)
 
 async def send_ad_step_fixed(update, bot: ExtBot, user_id):
     if user_id not in user_data:
-        logging.warning(f"user_id {user_id} missing from temporary user_data memory.")
         return
     
+    # FIX: Pehla button ab callback_data trigger karega jisse timer 100% start hoga aur redirect bhi handle hoga
     keyboard = [
         [InlineKeyboardButton("📺 Watch Ad (Start Timer)", callback_data="click_ad")],
         [InlineKeyboardButton("✅ Verify & Get Videos", callback_data="verify_batch")]
@@ -125,23 +100,28 @@ async def button_callback_fixed(update: Update, bot: ExtBot):
         await query.answer("❌ Session expired. Please try again.", show_alert=True)
         return
 
+    # 1. JAB USER WATCH AD PAR CLICK KAREGA
     if query.data == "click_ad":
         user_data[user_id]['click_time'] = time.time()
         user_data[user_id]['ad_clicked'] = True
         
+        # User ko alert dikhayenge aur link par redirect karne ke liye bolenge (Telegram policy secure redirect)
         await query.answer("⏱️ Timer Started! Khulne wale page par 30 seconds rukiye.", show_alert=True)
         
+        # UI update karke directly monetag link open karne ka option url button me convert kar denge
         updated_keyboard = [
             [InlineKeyboardButton("🔗 Open Ad Link Now", url=MONETAG_LINK)],
             [InlineKeyboardButton("✅ Verify & Get Videos", callback_data="verify_batch")]
         ]
         try:
             await query.edit_message_reply_markup(reply_markup=InlineKeyboardMarkup(updated_keyboard))
-        except Exception as e:
-            logging.error(f"Error editing markup: {e}")
+        except:
+            pass
         return
 
+    # 2. JAB USER VERIFY BUTTON PAR CLICK KAREGA
     if query.data == "verify_batch":
+        # Check 1: Kya user ne ad button daba kar timer shuru kiya?
         if not user_data[user_id].get('ad_clicked', False):
             await query.answer("❌ Pehle 'Watch Ad (Start Timer)' button par click karein!", show_alert=True)
             return
@@ -149,27 +129,17 @@ async def button_callback_fixed(update: Update, bot: ExtBot):
         click_time = user_data[user_id].get('click_time', 0)
         gap = time.time() - click_time
         
+        # Check 2: Kya 30 seconds poore hue?
         if gap < 30:
             await query.answer(f"❌ Ad verification incomplete! Abhi bhi {int(30 - gap)}s baaki hain.", show_alert=True)
             return
         
-        # 💾 MONGO SAVE (Wrapped in try-except for safety)
-        try:
-            users_collection.update_one(
-                {"user_id": user_id},
-                {"$set": {"is_verified": True, "verified_at": datetime.utcnow()}},
-                upsert=True
-            )
-            logging.info(f"✅ User {user_id} successfully saved/updated in MongoDB.")
-        except Exception as save_err:
-            logging.error(f"❌ Failed to save user {user_id} to MongoDB: {save_err}")
-
+        # Agar dono security check paas ho gaye
         await query.answer("✅ Verification Successful!")
-        await process_video_delivery(update, bot, user_id, user, is_callback=True)
+        await process_video_delivery(update, bot, user_id, user)
 
-async def process_video_delivery(update, bot: ExtBot, user_id, user, is_callback=True):
-    chat_id = update.callback_query.message.chat_id if is_callback else update.message.chat_id
-
+async def process_video_delivery(update, bot: ExtBot, user_id, user):
+    query = update.callback_query
     data = user_data[user_id]
     start_idx = data['current_index']
     end_idx = start_idx + data['batch_size']
@@ -178,12 +148,13 @@ async def process_video_delivery(update, bot: ExtBot, user_id, user, is_callback
     videos_sent_successfully = False
     for msg_id in current_batch:
         try:
-            await bot.copy_message(chat_id=chat_id, from_chat_id=data['channel'], message_id=msg_id)
+            await bot.copy_message(chat_id=query.message.chat_id, from_chat_id=data['channel'], message_id=msg_id)
             videos_sent_successfully = True
             await asyncio.sleep(0.5)
         except Exception as e: 
-            logging.error(f"Error sending video {msg_id}: {e}")
+            logging.error(e)
 
+    # LOG CHANNEL LOGIC (Sirf video milne par notification jayega)
     if videos_sent_successfully and LOG_GROUP_ID:
         try:
             first_name = user.first_name or "User"
@@ -202,11 +173,12 @@ async def process_video_delivery(update, bot: ExtBot, user_id, user, is_callback
 
     user_data[user_id]['current_index'] = end_idx
     if end_idx < len(data['videos']):
+        # Next batch ke liye reset karenge loop
         user_data[user_id]['click_time'] = 0
         user_data[user_id]['ad_clicked'] = False
         await send_ad_step_fixed(update, bot, user_id)
     else:
-        await bot.send_message(chat_id=chat_id, text="🎉 Saari videos complete ho gayi hain!")
+        await bot.send_message(chat_id=query.message.chat_id, text="🎉 Saari videos complete ho gayi hain!")
         if user_id in user_data:
             del user_data[user_id]
 
@@ -232,6 +204,6 @@ def webhook():
                 
             return "OK", 200
         except Exception as e:
-            logging.error(f"Webhook Main Error: {e}")
+            logging.error(f"Webhook Error: {e}")
             return "OK", 200
     return "Invalid Request", 400

@@ -93,7 +93,7 @@ async def start_with_text(update: Update, bot: ExtBot, text_message: str):
         await bot.send_message(chat_id=chat_id, text="👋 Welcome! Kuch download karne ke liye link par click karein.")
         return
 
-    # CASE 1: Verification Callback Handling (User shortlink bypass karke aaya)
+    # CASE 1: Verification Callback Handling
     if raw_arg.startswith("verify_"):
         token = raw_arg.split("_")[1]
         db_user = users_collection.find_one({"_id": user_id, "current_token": token})
@@ -120,7 +120,6 @@ async def start_with_text(update: Update, bot: ExtBot, text_message: str):
             saved_arg = db_user.get("pending_arg")
             if saved_arg:
                 await bot.send_message(chat_id=chat_id, text="✅ Verification Successful! Videos send ho rahi hain...")
-                # Recursion bypass tracking structure
                 await start_with_text(update, bot, f"/start {saved_arg}")
             else:
                 await bot.send_message(chat_id=chat_id, text="✅ Verification Successful! Aap agle 8 ghante ke liye verified hain.")
@@ -149,7 +148,6 @@ async def start_with_text(update: Update, bot: ExtBot, text_message: str):
         is_verified = check_verification(user_id)
         
         if is_verified:
-            # Synchronous processing prevents execution state mismatch inside Vercel engine
             await process_video_delivery_sync(chat_id, bot, user_id, user, video_list, target_ch, batch_size, ch_num)
         else:
             db_user = users_collection.find_one({"_id": user_id})
@@ -196,7 +194,7 @@ async def process_video_delivery_sync(chat_id, bot: ExtBot, user_id, user, video
             try:
                 await bot.copy_message(chat_id=chat_id, from_chat_id=target_ch, message_id=msg_id)
                 videos_sent_successfully = True
-                await asyncio.sleep(0.8) # Safeguard anti-flood delay
+                await asyncio.sleep(0.8) 
             except Exception as telegram_error: 
                 logging.error(f"Copy message failed: {telegram_error}")
                 if LOG_GROUP_ID:
@@ -232,38 +230,47 @@ async def process_video_delivery_sync(chat_id, bot: ExtBot, user_id, user, video
                 logging.error(f"Log Channel Error: {log_err}")
 
         current_index = end_idx
-        await asyncio.sleep(1.5) # Extra chill period to control rate limits
+        await asyncio.sleep(1.5) 
 
     try:
         await bot.send_message(chat_id=chat_id, text="🎉 Saari videos complete ho gayi hain!")
     except: pass
 
-# --- FLASK SERVER & WEBHOOK ---
+# --- FLASK SERVER & WEBHOOK (FIXED FOR PTB v20+) ---
 app = Flask(__name__)
 
+# Global runtime loop create/fetch karna
+try:
+    loop = asyncio.get_event_loop()
+except RuntimeError:
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+
 @app.route('/')
-def home(): return "Bot is Active with Full Features & Rotation Matrix!"
+def home(): 
+    return "Bot is Active with Full Features & Rotation Matrix!"
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
     if request.method == "POST":
-        update_json = request.get_json(force=True)
-        
-        # Generator structure blocks pipeline until execution context resolves completely
-        def generate():
-            try:
-                bot = ExtBot(token=TOKEN)
-                update = Update.de_json(update_json, bot)
-                
-                if update.message and update.message.text:
-                    if update.message.text.startswith('/start'):
-                        loop = asyncio.new_event_loop()
-                        asyncio.set_event_loop(loop)
-                        loop.run_until_complete(start_with_text(update, bot, update.message.text))
-                        loop.close()
-            except Exception as e:
-                logging.error(f"Execution Error: {e}")
-            yield "OK"
+        try:
+            update_json = request.get_json(force=True)
+            bot = ExtBot(token=TOKEN)
+            update = Update.de_json(update_json, bot)
+            
+            if update and update.message and update.message.text:
+                if update.message.text.startswith('/start'):
+                    # Async execution context ko Flask main thread ke sath map karne ke liye
+                    loop.run_until_complete(start_with_text(update, bot, update.message.text))
+            
+            return "OK", 200
+        except Exception as e:
+            logging.error(f"Execution Error in Webhook: {e}")
+            return "Internal Server Error", 500
+            
+    return "Method Not Allowed", 405
 
-        return Response(generate(), mimetype="text/plain")
-    return "Invalid Request", 400
+if __name__ == '__main__':
+    # Local debugging ke liye port automatic manage hogi
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host='0.0.0.0', port=port)

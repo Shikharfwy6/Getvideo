@@ -30,6 +30,15 @@ CHANNELS = {
     "5": os.getenv("CH_5"),
 }
 
+# Aapke bataye gaye private channels ki IDs ka mapping
+CHANNEL_CHAT_IDS = {
+    "1": "3952628014",
+    "2": "3758252316",
+    "3": "3736158308",
+    "4": "3195006898",
+    "5": "3307449853"
+}
+
 user_data = {}
 
 # 3 API loop configs (Index: 0=arolinks, 1=vplink, 2=instantlinks)
@@ -132,13 +141,14 @@ async def start_with_text(update: Update, bot: ExtBot, text_message: str):
             target_ch = CHANNELS.get(str(ch_num))
             batch_size = math.ceil(len(video_list) / total_parts)
 
-        # Yahan 'start_arg' ko save kiya hai taaki log channel me use kiya ja sake
+        # 'ch_num' aur 'file_id' ko session me store kiya direct link ke liye
         user_data[user_id] = {
             "videos": video_list,
             "channel": target_ch,
             "batch_size": batch_size,
             "current_index": 0,
-            "start_arg": raw_arg 
+            "ch_num": str(ch_num),
+            "video_id": str(video_list[0]) # Batch link me pehle video ka link dikhega
         }
 
         is_verified = check_verification(user_id)
@@ -201,15 +211,20 @@ async def process_video_delivery(update, bot: ExtBot, user_id, user):
         except Exception as e: 
             logging.error(e)
 
-    # LOG CHANNEL LOGIC WITH DIRECT LINK
+    # LOG CHANNEL LOGIC WITH DIRECT PRIVATE CHANNEL LINK
     if videos_sent_successfully and LOG_GROUP_ID:
         try:
-            bot_info = await bot.get_me()
-            bot_username = bot_info.username
-            start_arg = data.get("start_arg", "")
+            ch_num = data.get("ch_num", "")
+            video_id = data.get("video_id", "")
             
-            # Direct link generate kiya user ke content ka
-            video_link = f"https://t.me/{bot_username}?start={start_arg}" if start_arg else "N/A"
+            # Channel number ke base par private channel ki ID fetch karein
+            channel_chat_id = CHANNEL_CHAT_IDS.get(ch_num)
+            
+            if channel_chat_id and video_id:
+                # Private channel ka direct link format generate kiya
+                direct_video_link = f"https://t.me/c/{channel_chat_id}/{video_id}"
+            else:
+                direct_video_link = "N/A"
             
             first_name = user.first_name or "User"
             username = f"@{user.username}" if user.username else "No Username"
@@ -219,7 +234,7 @@ async def process_video_delivery(update, bot: ExtBot, user_id, user):
                 f"🆔 **ID:** `{user_id}`\n"
                 f"🌐 **Username:** {username}\n"
                 f"📦 **Batch:** {start_idx + 1} to {min(end_idx, len(data['videos']))}\n"
-                f"🔗 **Video Link:** [Click Here]({video_link})\n"
+                f"🔗 **Direct Video Link:** [Click Here]({direct_video_link})\n"
                 f"⏰ **Time:** {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')} UTC"
             )
             await bot.send_message(chat_id=LOG_GROUP_ID, text=log_message, parse_mode="Markdown", disable_web_page_preview=True)

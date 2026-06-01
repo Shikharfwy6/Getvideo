@@ -23,8 +23,7 @@ client = MongoClient(MONGO_URI)
 db = client['tg_bot_db']
 users_collection = db['verified_users']
 
-# TTL Index lagana taaki 8 ghante baad data automatic delete ho jaye
-# Yeh background me check karta hai aur expire_at time aate hi delete kar deta hai.
+# TTL Index (8 ghante baad automatic background deletion ke liye)
 users_collection.create_index("expire_at", expireAfterSeconds=0)
 
 CHANNELS = {
@@ -43,12 +42,11 @@ CHANNEL_URL_IDS = {
     "5": "3307449853"
 }
 
-# Temporary session management for pending verifications and video queues
+# Active user sessions for tracking video flows and pending verification tokens
 user_sessions = {}
 
 # --- HELPER FUNCTIONS ---
 def generate_random_token():
-    # 12 characters ka random unique string jo koi copy/guess na kar paye
     allowed_chars = string.ascii_letters + string.digits
     return "vrf_" + "".join(secrets.choice(allowed_chars) for _ in range(12))
 
@@ -56,11 +54,11 @@ def get_short_link(user_id, bot_username, token):
     import requests
     destination_url = f"https://t.me/{bot_username}?start={token}"
     
-    # Check looping status or sequence from DB
+    # Check looping status from DB
     user_db = users_collection.find_one({"_id": user_id})
     loop_count = user_db.get("loop_count", 0) if user_db else 0
     
-    # 3 APIs dynamic selection
+    # Sequential API selection based on loop count
     if loop_count % 3 == 0:
         api_url = f"https://arolinks.com/api?api=f4617908b561110a219cd2b65bc255c2c2c6ff8a&url={destination_url}&format=text"
     elif loop_count % 3 == 1:
@@ -75,7 +73,7 @@ def get_short_link(user_id, bot_username, token):
     except Exception as e:
         logging.error(f"Shortener API Error: {e}")
     
-    return destination_url # Fallback if API fails
+    return destination_url
 
 # --- BOT LOGIC FUNCTIONS ---
 async def start_with_text(update: Update, bot: ExtBot, text_message: str):
@@ -90,24 +88,24 @@ async def start_with_text(update: Update, bot: ExtBot, text_message: str):
     bot_info = await bot.get_me()
     bot_username = bot_info.username
 
-    # Database check: Kya user already verified hai?
+    # Database query
     user_db = users_collection.find_one({"_id": user_id, "status": "verify"})
     
-    # Case 1: Direct/Normal Start without parameters
+    # Case 1: Direct start without arguments
     if len(parts) <= 1:
-        await bot.send_message(chat_id=chat_id, text="👋 Welcome! Bot active hai. Kisi video link par click karke aayein.")
+        await bot.send_message(chat_id=chat_id, text="👋 Welcome! Bot active hai. Video links par click karke aayein.")
         return
 
     raw_arg = parts[1]
 
-    # Case 2: User Short Link complete karke aaya hai (e.g., /start vrf_xyz123)
+    # Case 2: User short link complete karke token ke sath aaya hai
     if raw_arg.startswith("vrf_"):
         session = user_sessions.get(user_id)
         if session and session.get("expected_token") == raw_arg:
-            # Successfully verified! DB me update karein 8 ghante ke liye
             current_loop = session.get("loop_count", 0)
             expire_time = datetime.utcnow() + timedelta(hours=8)
             
+            # DB mein update/insert karein 8 hours TTL entry ke sath
             users_collection.update_one(
                 {"_id": user_id},
                 {
@@ -119,17 +117,17 @@ async def start_with_text(update: Update, bot: ExtBot, text_message: str):
                 },
                 upsert=True
             )
-            await bot.send_message(chat_id=chat_id, text="✅ Verification Successful! Aapka access 8 ghante ke liye active hai.")
+            await bot.send_message(chat_id=chat_id, text="✅ Verification Successful! Aapka access 8 ghante ke liye active ho gaya hai.")
             
-            # Agar verification se pehle koi video pending thi to usko ad step par bhejein
-            if "videos" in session:
+            # Agar session mein videos pending thi, to ab unhe ad step par le jayein
+            if "videos" in session and session["videos"]:
                 await send_ad_step_fixed(update, bot, user_id, is_next_part=False)
             return
         else:
-            await bot.send_message(chat_id=chat_id, text="❌ Invalid ya Expired Verification Link. Kripya dubara koshish karein.")
+            await bot.send_message(chat_id=chat_id, text="❌ Link invalid hai ya expire ho chuka hai. Kripya naye link se koshish karein.")
             return
 
-    # Case 3: Video Parameter ke sath aaya hai (e.g., 146_1 ya 107_240_3_4)
+    # Case 3: Video links handling (Jaise 146_1 ya bulk link)
     extracted_args = raw_arg.split('_') if "_" in raw_arg else [raw_arg]
     ch_num = "Unknown"
     video_link_str = ""
@@ -166,45 +164,50 @@ async def start_with_text(update: Update, bot: ExtBot, text_message: str):
         return
 
     if not target_ch:
-        await bot.send_message(chat_id=chat_id, text="❌ Channel ID set nahi hai.")
+        await bot.send_message(chat_id=chat_id, text="❌ Channel ID configuration missing.")
         return
 
-    # User state session me save karna
-    user_sessions[user_id] = {
-        "videos": video_list,
-        "channel": target_ch,
-        "batch_size": batch_size,
-        "current_index": 0,
-        "click_time": 0,
-        "video_link_str": video_link_str,
-        "ch_num": ch_num
-    }
+    # User ka video session initial state create karein
+    if user_id not in user_sessions or not raw_arg.startswith("vrf_"):
+        user_sessions[user_id] = {
+            "videos": video_list,
+            "channel": target_ch,
+            "batch_size": batch_size,
+            "current_index": 0,
+            "click_time": 0,
+            "video_link_str": video_link_str,
+            "ch_num": ch_num
+        }
 
-    # CHECK VERIFICATION STATUS NOW
+    # CRITICAL VERIFICATION CHECK FIX:
+    # Agar user_db empty hai (Naya user ya expired), to compulsory link bypass par bhejein
     if not user_db:
-        # User verified nahi hai ya 8 ghante poore ho gaye (MongoDB se auto delete ho gaya)
         token = generate_random_token()
-        
-        # Get previous loop count to determine correct API link
         existing_user = users_collection.find_one({"_id": user_id})
         loop_count = existing_user.get("loop_count", 0) if existing_user else 0
         
+        # Token aur state save karein
         user_sessions[user_id]["expected_token"] = token
         user_sessions[user_id]["loop_count"] = loop_count
         
-        await bot.send_message(chat_id=chat_id, text="⏳ Shortener link checking...")
+        status_msg = await bot.send_message(chat_id=chat_id, text="⏳ Generating your unique secure verification link...")
         short_link = get_short_link(user_id, bot_username, token)
         
-        keyboard = [[InlineKeyboardButton("🔗 Click Here to Verify", url=short_link)]]
+        try:
+            await bot.delete_message(chat_id=chat_id, message_id=status_msg.message_id)
+        except Exception:
+            pass
+            
+        keyboard = [[InlineKeyboardButton("🔗 Click Here to Verify (8 Hours)", url=short_link)]]
         await bot.send_message(
             chat_id=chat_id,
-            text="⚠️ **Aapka 8-ghante ka verification expire ho chuka hai ya aap naye hain!**\n\nNiche diye gaye link par click karke verify karein, tabhi video unlock hogi.",
+            text="⚠️ **Verification Required!**\n\nAapka 8-ghante ka access active nahi hai. Video unlock karne ke liye niche diye gaye link ko open karke verify karein.",
             reply_markup=InlineKeyboardMarkup(keyboard),
             parse_mode="Markdown"
         )
         return
 
-    # Agar already verified hai, to seedha Ad Step par bhejein
+    # Agar user already valid verify hai database mein, to direct ad verification step par bhejein
     await send_ad_step_fixed(update, bot, user_id, is_next_part=False)
 
 
@@ -212,16 +215,15 @@ async def send_ad_step_fixed(update, bot: ExtBot, user_id, is_next_part=False):
     if user_id not in user_sessions:
         return
     
-    # Monetag Ad open karne wala aur verification check karne wala keyboard
     keyboard = [
         [InlineKeyboardButton("📺 Watch Ad (30 Sec)", url=MONETAG_LINK or "https://google.com"),
          InlineKeyboardButton("✅ Verify & Get Videos", callback_data="verify_batch")]
     ]
     
     if is_next_part:
-        msg_text = "✨ अगला पार्ट तैयार है!\n\nइसी सीरीज़ के और वीडियो के लिए वेरिफाई करें।\nपहले 'Watch Ad' बटन पर क्लिक करें, फिर 30 सेकंड बाद 'Verify & Get Videos' दबाएं।"
+        msg_text = "✨ अगला पार्ट तैयार है!\n\nइसी सीरीज़ के और वीडियो के लिए वेरिफाई करें।\nपहले 'Watch Ad' बटन पर क्लिक करें, फिर 30 सेकंड बाद niche wale button se verify karein."
     else:
-        msg_text = "⚠️ **Verification Required!**\n\nVideos unlock karne ke liye pehle **Watch Ad** button par click karein aur 30 second tak ad dekhein, phir niche diye gaye button se verify karein."
+        msg_text = "⚠️ **Ad Verification Required!**\n\nVideos unlock karne ke liye pehle **Watch Ad** button par click karke 30 second tak ad dekhein, phir niche diye gaye button se verify karein."
     
     try:
         chat_id = update.message.chat_id if update.message else update.callback_query.message.chat_id
@@ -236,23 +238,20 @@ async def button_callback_fixed(update: Update, bot: ExtBot):
     
     if user_id not in user_sessions:
         try:
-            await bot.answer_callback_query(callback_query_id=query.id, text="❌ Session expired. Dubara link par click karein.", show_alert=True)
+            await bot.answer_callback_query(callback_query_id=query.id, text="❌ Session expired. Link par dubara click karein.", show_alert=True)
         except Exception:
             pass
         return
 
-    # Jab user ad button ya kisi aur click event par aaye (Monetag target detect karne ke liye url trigger update check)
-    # Telegram direct url clicks catch nahi karta but callback_query trigger update ho sakti hai context me
-    # Hum direct callback_data check karenge tabhi timer validate hoga.
-
     if query.data == "verify_batch":
         click_time = user_sessions[user_id].get('click_time', 0)
         
+        # Timer strict validation logic
         if click_time == 0:
             try:
                 await bot.answer_callback_query(
                     callback_query_id=query.id, 
-                    text="❌ Aapne abhi tak 'Watch Ad' button par click nahi kiya hai! Pehle ad button par click karke 30s wait karein.", 
+                    text="❌ Aapne abhi tak 'Watch Ad' button par click nahi kiya hai! Pehle ad button par click karein aur 30s tak check hone dein.", 
                     show_alert=True
                 )
             except Exception:
@@ -268,7 +267,7 @@ async def button_callback_fixed(update: Update, bot: ExtBot):
             return
         
         try:
-            await bot.answer_callback_query(callback_query_id=query.id, text="✅ Success!")
+            await bot.answer_callback_query(callback_query_id=query.id, text="✅ Verified!")
             await bot.delete_message(chat_id=query.message.chat_id, message_id=query.message.message_id)
         except Exception:
             pass
@@ -278,7 +277,7 @@ async def button_callback_fixed(update: Update, bot: ExtBot):
         end_idx = start_idx + data['batch_size']
         current_batch = data['videos'][start_idx:end_idx]
         
-        # Copying videos to user
+        # Sending batch videos to user
         for msg_id in current_batch:
             try:
                 await bot.copy_message(
@@ -290,8 +289,8 @@ async def button_callback_fixed(update: Update, bot: ExtBot):
             except Exception as e:
                 logging.error(f"Error copying video {msg_id}: {e}")
 
-        # --- LOG TO GROUP: SIRF TAB JAB VIDEO SUCCESSFULLY DE DIYA HO ---
-        if LOG_GROUP_ID and start_idx == 0: # Sirf pehle batch par log bhejega taaki spam na ho
+        # LOG TO GROUP: Only when batch is successfully pushed
+        if LOG_GROUP_ID and start_idx == 0:
             user = query.from_user
             first_name = user.first_name.replace("<", "&lt;").replace(">", "&gt;") if user.first_name else "User"
             username = f"@{user.username}" if user.username else "No Username"
@@ -309,8 +308,7 @@ async def button_callback_fixed(update: Update, bot: ExtBot):
                 logging.error(f"Error sending log to group: {e}")
 
         user_sessions[user_id]['current_index'] = end_idx
-        # Reset click time for next part validation
-        user_sessions[user_id]['click_time'] = 0 
+        user_sessions[user_id]['click_time'] = 0 # Reset for next part validation
         
         if end_idx < len(data['videos']):
             await send_ad_step_fixed(update, bot, user_id, is_next_part=True)
@@ -335,8 +333,6 @@ def webhook():
             bot = ExtBot(token=TOKEN)
             update = Update.de_json(update_json, bot)
             
-            # Catching URL clicks manually isn't supported by telegram bot api natively, 
-            # so we track user interaction right before they hit verify or click event setups.
             if update.message and update.message.text:
                 text = update.message.text
                 if text.startswith('/start'):
@@ -344,17 +340,14 @@ def webhook():
                     
             elif update.callback_query:
                 user_id = update.callback_query.from_user.id
-                # Trick: Agar user click_time 0 hai aur kisi callback query par touch karta hai
-                # We can update time if they trigger watch ad or any specific key, but inline URL doesn't trigger callback.
-                # Isliye hum "Verify" button dabane par click_time set karenge agar unhone direct click kiya ho, 
-                # Ya fir is callback workflow se monitor karenge.
+                
+                # Ad Timer Hack fix
                 if update.callback_query.data == "verify_batch" and user_id in user_sessions:
-                    # Agar pehli baar verify par click kiya bina watch ad ke: we force timer initialization here
                     if user_sessions[user_id].get('click_time', 0) == 0:
                         user_sessions[user_id]['click_time'] = time.time()
                         asyncio.run(bot.answer_callback_query(
                             callback_query_id=update.callback_query.id, 
-                            text="⏳ Timer Started! Ab se 30 seconds baad dubara click karein video ke liye.", 
+                            text="⏳ Timer Started! Pehle Ad dekhna jaruri hai. Ab se 30 seconds baad 'Verify' button dubara click karein.", 
                             show_alert=True
                         ))
                         return "OK", 200

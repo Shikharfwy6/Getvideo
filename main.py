@@ -1,27 +1,18 @@
 import logging
 import os
-import time
 import asyncio
 import math
-import uuid
-import requests
-from datetime import datetime, timedelta
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import CallbackContext, ExtBot
+from datetime import datetime
+from telegram import Update
+from telegram.ext import ExtBot
 from flask import Flask, request
-from pymongo import MongoClient
 
 # --- CONFIG & LOGGING ---
 logging.basicConfig(level=logging.INFO)
 TOKEN = os.getenv("BOT_TOKEN")
 LOG_GROUP_ID = os.getenv("LOG_GROUP_ID") 
-MONGO_URI = os.getenv("MONGO_URI")
 
-# MongoDB Setup
-mongo_client = MongoClient(MONGO_URI)
-db = mongo_client['TelegramBotDB']
-users_collection = db['users']
-
+# Channels jahan se videos copy karni hain (Env Variables)
 CHANNELS = {
     "1": os.getenv("CH_1"),
     "2": os.getenv("CH_2"),
@@ -30,6 +21,7 @@ CHANNELS = {
     "5": os.getenv("CH_5"),
 }
 
+# Logs me direct link generate karne ke liye chat IDs mapping
 CHANNEL_CHAT_IDS = {
     "1": "3952628014",
     "2": "3758252316",
@@ -38,41 +30,8 @@ CHANNEL_CHAT_IDS = {
     "5": "3307449853"
 }
 
+# In-memory dictionary active delivery sessions track karne ke liye
 user_data = {}
-
-API_CONFIGS = [
-    {"name": "Arolinks", "url": "https://arolinks.com/api?api=f4617908b561110a219cd2b65bc255c2c2c6ff8a&url={url}"},
-    {"name": "Vplink", "url": "https://vplink.in/api?api=017ab25e4402465d00047e8e2897f3c6b38afbd9&url={url}"},
-    {"name": "Instantlinks", "url": "https://instantlinks.co/api?api=323c4585c0d0b8bc04a170cd57a2e6a74ac6d8aa&url={url}"}
-]
-
-# --- HELPER FUNCTIONS ---
-def check_verification(user_id):
-    try:
-        user = users_collection.find_one({"_id": int(user_id)})
-        if user:
-            expiry = user.get("expiry")
-            if expiry and datetime.utcnow() < expiry:
-                if user.get("status") == "verify":
-                    return True
-    except Exception as e:
-        logging.error(f"Database check error: {e}")
-    return False
-
-def get_shortlink(api_index, destination_url):
-    """Generates shortlink safely. Falls back to direct link if API fails."""
-    try:
-        config = API_CONFIGS[api_index]
-        api_url = config["url"].format(url=destination_url)
-        response = requests.get(api_url, timeout=7).json() # Added timeout to prevent hanging
-        
-        if response.get("status") == "success":
-            return response.get("shortenedUrl")
-        elif "shortenedUrl" in response:
-            return response["shortenedUrl"]
-    except Exception as e:
-        logging.error(f"Shortener API failed for {API_CONFIGS[api_index]['name']}: {e}")
-    return destination_url # Fallback: return normal link if shortener crashes
 
 # --- BOT LOGIC FUNCTIONS ---
 async def start_with_text(update: Update, bot: ExtBot, text_message: str):
@@ -85,51 +44,13 @@ async def start_with_text(update: Update, bot: ExtBot, text_message: str):
     
     parts = text_message.split()
     raw_arg = parts[1] if len(parts) > 1 else ""
-    
-    try:
-        bot_info = await bot.get_me()
-        bot_username = bot_info.username
-    except Exception as e:
-        logging.error(f"Failed to get bot info: {e}")
-        bot_username = "Getvideo81827_bot"
 
+    # Normal /start bina kisi parameter ke
     if not raw_arg:
-        await bot.send_message(chat_id=chat_id, text="👋 Welcome! Kuch download karne ke liye link par click karein.")
+        await bot.send_message(chat_id=chat_id, text="👋 Welcome! Kisi video link par click karke aayein to aapko video mil jayegi.")
         return
 
-    # CASE 1: Verification Callback handling
-    if raw_arg.startswith("verify_"):
-        token = raw_arg.split("_")[1]
-        db_user = users_collection.find_one({"_id": user_id, "current_token": token})
-        if db_user:
-            now = datetime.utcnow()
-            expiry_time = now + timedelta(hours=8)
-            current_index = db_user.get("api_index", 0)
-            next_index = (current_index + 1) % len(API_CONFIGS)
-            
-            users_collection.update_one(
-                {"_id": user_id},
-                {
-                    "$set": {
-                        "status": "verify",
-                        "expiry": expiry_time,
-                        "api_index": next_index,
-                        "time_log": now.strftime("%H:%M:%S")
-                    },
-                    "$unset": {"current_token": ""}
-                }
-            )
-            
-            saved_arg = db_user.get("pending_arg")
-            if saved_arg:
-                await start_with_text(update, bot, f"/start {saved_arg}")
-            else:
-                await bot.send_message(chat_id=chat_id, text="✅ Verification Successful! Aap agle 8 ghante ke liye verified hain.")
-        else:
-            await bot.send_message(chat_id=chat_id, text="❌ Invalid ya Expired Verification Link! Kripya dobara try karein.")
-        return
-
-    # CASE 2: Video Query Link handling
+    # Link arguments parse karna (Single file ya Batch format)
     extracted_args = raw_arg.split('_') if "_" in raw_arg else [raw_arg]
     if len(extracted_args) == 2 or len(extracted_args) == 4:
         if len(extracted_args) == 2:
@@ -143,15 +64,16 @@ async def start_with_text(update: Update, bot: ExtBot, text_message: str):
             target_ch = CHANNELS.get(str(ch_num))
             batch_size = math.ceil(len(video_list) / total_parts)
 
-        # Secure parsing check for missing configurations
+        # Config error check agar channel missing ho
         if not target_ch:
-            await bot.send_message(chat_id=chat_id, text=f"❌ Configuration Error: CH_{ch_num} is missing in Env setup!")
+            await bot.send_message(chat_id=chat_id, text=f"❌ Configuration Error: CH_{ch_num} is missing in Env variables!")
             return
 
-        # Auto format check for missing prefix chat IDs
+        # Target channel ke aage automatic -100 fix karna agar na ho
         if not str(target_ch).startswith("-100"):
             target_ch = f"-100{target_ch}"
 
+        # Current session config save karna
         user_data[user_id] = {
             "videos": video_list,
             "channel": target_ch,
@@ -161,39 +83,9 @@ async def start_with_text(update: Update, bot: ExtBot, text_message: str):
             "video_id": str(video_list[0])
         }
 
-        is_verified = check_verification(user_id)
-        
-        if is_verified:
-            asyncio.create_task(process_video_delivery(chat_id, bot, user_id, user))
-        else:
-            db_user = users_collection.find_one({"_id": user_id})
-            api_index = db_user.get("api_index", 0) if db_user else 0
-            secure_token = uuid.uuid4().hex[:12]
-            
-            users_collection.update_one(
-                {"_id": user_id},
-                {
-                    "$set": {
-                        "status": "unverified",
-                        "current_token": secure_token,
-                        "pending_arg": raw_arg,
-                        "api_index": api_index
-                    }
-                },
-                upsert=True
-            )
-            
-            destination_link = f"https://t.me/{bot_username}?start=verify_{secure_token}"
-            short_link = get_shortlink(api_index, destination_link)
-            api_name = API_CONFIGS[api_index]["name"]
-            
-            keyboard = [[InlineKeyboardButton(f"🔐 Verify via {api_name}", url=short_link)]]
-            msg_text = (
-                "⚠️ **सत्यापन आवश्यक Verification Required!**\n\n"
-                f"आपका वेरिफिकेशन सेशन समाप्त हो चुका है। "
-                f"वीडियो पाने के लिए नीचे दिए गए बटन पर क्लिक करके **{api_name}** से वेरीफाई करें।"
-            )
-            await bot.send_message(chat_id=chat_id, text=msg_text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
+        # DIRECT VIDEO DELIVERY (Bina kisi verification/shortener ke)
+        # Vercel timeout protection ke liye asyncio task background me run hoga
+        asyncio.create_task(process_video_delivery(chat_id, bot, user_id, user))
 
 async def process_video_delivery(chat_id, bot: ExtBot, user_id, user):
     if user_id not in user_data:
@@ -201,6 +93,7 @@ async def process_video_delivery(chat_id, bot: ExtBot, user_id, user):
 
     data = user_data[user_id]
     
+    # Safe While loop to avoid infinite request retry in Vercel
     while data['current_index'] < len(data['videos']):
         start_idx = data['current_index']
         end_idx = start_idx + data['batch_size']
@@ -209,13 +102,13 @@ async def process_video_delivery(chat_id, bot: ExtBot, user_id, user):
         videos_sent_successfully = False
         for msg_id in current_batch:
             try:
-                # Target channel dynamic check ensures copy is seamless
                 await bot.copy_message(chat_id=chat_id, from_chat_id=data['channel'], message_id=msg_id)
                 videos_sent_successfully = True
-                await asyncio.sleep(0.6) 
+                await asyncio.sleep(0.6) # Flood protection limit
             except Exception as e: 
                 logging.error(f"Error copying message {msg_id} from {data['channel']}: {e}")
 
+        # Log Channel mapping message sending logic
         if videos_sent_successfully and LOG_GROUP_ID:
             try:
                 ch_num = data.get("ch_num", "")
@@ -246,6 +139,7 @@ async def process_video_delivery(chat_id, bot: ExtBot, user_id, user):
     except Exception as e:
         logging.error(f"Failed to send completion message: {e}")
         
+    # User data clear out to keep memory lightweight
     if user_id in user_data:
         del user_data[user_id]
 
@@ -253,7 +147,7 @@ async def process_video_delivery(chat_id, bot: ExtBot, user_id, user):
 app = Flask(__name__)
 
 @app.route('/')
-def home(): return "Bot is Active!"
+def home(): return "Bot is Active! No Verification Engine Installed."
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
@@ -267,7 +161,7 @@ def webhook():
                 if update.message.text.startswith('/start'):
                     asyncio.run(start_with_text(update, bot, update.message.text))
             
-            return "OK", 200 
+            return "OK", 200 # Instant response Vercel webhook engine ko trigger retry se rokega
         except Exception as e:
             logging.error(f"Webhook Error: {e}")
             return "OK", 200

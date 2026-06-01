@@ -6,7 +6,7 @@ import math
 import uuid
 import requests
 from datetime import datetime, timedelta
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import CallbackContext, ExtBot
 from flask import Flask, request
 from pymongo import MongoClient
@@ -14,7 +14,6 @@ from pymongo import MongoClient
 # --- CONFIG & LOGGING ---
 logging.basicConfig(level=logging.INFO)
 TOKEN = os.getenv("BOT_TOKEN")
-# Yahan aapka Monetag direct link aayega
 MONETAG_LINK = os.getenv("MONETAG_DIRECT_LINK") or "https://google.com"
 LOG_GROUP_ID = os.getenv("LOG_GROUP_ID") 
 MONGO_URI = os.getenv("MONGO_URI")
@@ -48,7 +47,6 @@ async def start_with_text(update: Update, bot: ExtBot, text_message: str):
         await bot.send_message(chat_id=update.message.chat_id, text="👋 Welcome! Bot active hai.")
         return
 
-    # Video processing configurations
     extracted_args = raw_arg.split('_') if "_" in raw_arg else [raw_arg]
     if len(extracted_args) == 2:
         file_id, ch_num = extracted_args
@@ -77,17 +75,17 @@ async def send_ad_step_fixed(update, bot: ExtBot, user_id):
     if user_id not in user_data:
         return
     
-    # 2 Buttons Menu: Pehle srif "Watch Ad" dikhega jo background me timer control karega
+    # FIX: Pehla button ab callback_data trigger karega jisse timer 100% start hoga aur redirect bhi handle hoga
     keyboard = [
-        [InlineKeyboardButton("📺 Watch Ad & Start Timer", web_app=WebAppInfo(url=MONETAG_LINK))],
+        [InlineKeyboardButton("📺 Watch Ad (Start Timer)", callback_data="click_ad")],
         [InlineKeyboardButton("✅ Verify & Get Videos", callback_data="verify_batch")]
     ]
     
     msg_text = (
-        "⚠️ **Ad Verification Loop:**\n\n"
-        "1. Pehle **'📺 Watch Ad & Start Timer'** par click karein.\n"
-        "2. Ad khulne ke baad **30 Seconds** tak rukiye.\n"
-        "3. Uske baad wapas aakar **'✅ Verify & Get Videos'** dabayein."
+        "⚠️ **Ad Verification Required!**\n\n"
+        "1. Pehle **'📺 Watch Ad (Start Timer)'** button par click karein.\n"
+        "2. Ad khulne ke baad **30 Seconds** tak wait karein.\n"
+        "3. Wapas aakar **'✅ Verify & Get Videos'** par click karke apni video lein."
     )
     
     chat_id = update.message.chat_id if update.message else update.callback_query.message.chat_id
@@ -102,23 +100,41 @@ async def button_callback_fixed(update: Update, bot: ExtBot):
         await query.answer("❌ Session expired. Please try again.", show_alert=True)
         return
 
-    if query.data == "verify_batch":
-        # SECURITY CHECK 1: Agar user ne web_app ad link par click hi nahi kiya
-        # Telegram rules ke mutabik web_app open hote hi current time initialize ho jata hai hmare database/cache me.
-        click_time = user_data[user_id].get('click_time', 0)
+    # 1. JAB USER WATCH AD PAR CLICK KAREGA
+    if query.data == "click_ad":
+        user_data[user_id]['click_time'] = time.time()
+        user_data[user_id]['ad_clicked'] = True
         
-        if click_time == 0:
-            # Matlab user ne seedha bina ad dekhe verify dabane ki koshish ki
-            await query.answer("❌ Pehle upar diye gaye 'Watch Ad' button par click karke ad dekhein!", show_alert=True)
+        # User ko alert dikhayenge aur link par redirect karne ke liye bolenge (Telegram policy secure redirect)
+        await query.answer("⏱️ Timer Started! Khulne wale page par 30 seconds rukiye.", show_alert=True)
+        
+        # UI update karke directly monetag link open karne ka option url button me convert kar denge
+        updated_keyboard = [
+            [InlineKeyboardButton("🔗 Open Ad Link Now", url=MONETAG_LINK)],
+            [InlineKeyboardButton("✅ Verify & Get Videos", callback_data="verify_batch")]
+        ]
+        try:
+            await query.edit_message_reply_markup(reply_markup=InlineKeyboardMarkup(updated_keyboard))
+        except:
+            pass
+        return
+
+    # 2. JAB USER VERIFY BUTTON PAR CLICK KAREGA
+    if query.data == "verify_batch":
+        # Check 1: Kya user ne ad button daba kar timer shuru kiya?
+        if not user_data[user_id].get('ad_clicked', False):
+            await query.answer("❌ Pehle 'Watch Ad (Start Timer)' button par click karein!", show_alert=True)
             return
 
-        # SECURITY CHECK 2: Time Gap verification (30 seconds)
+        click_time = user_data[user_id].get('click_time', 0)
         gap = time.time() - click_time
+        
+        # Check 2: Kya 30 seconds poore hue?
         if gap < 30:
-            await query.answer(f"❌ Ad verification incomplete! Aur {int(30 - gap)}s baaki hain.", show_alert=True)
+            await query.answer(f"❌ Ad verification incomplete! Abhi bhi {int(30 - gap)}s baaki hain.", show_alert=True)
             return
         
-        # Agar dono checks paas ho gaye, toh video delivery shuru
+        # Agar dono security check paas ho gaye
         await query.answer("✅ Verification Successful!")
         await process_video_delivery(update, bot, user_id, user)
 
@@ -138,7 +154,7 @@ async def process_video_delivery(update, bot: ExtBot, user_id, user):
         except Exception as e: 
             logging.error(e)
 
-    # LOG CHANNEL LOGIC (Srif tabhi notification jayega jab delivery complete ho)
+    # LOG CHANNEL LOGIC (Sirf video milne par notification jayega)
     if videos_sent_successfully and LOG_GROUP_ID:
         try:
             first_name = user.first_name or "User"
@@ -157,8 +173,9 @@ async def process_video_delivery(update, bot: ExtBot, user_id, user):
 
     user_data[user_id]['current_index'] = end_idx
     if end_idx < len(data['videos']):
-        # Reset for next batch loop
+        # Next batch ke liye reset karenge loop
         user_data[user_id]['click_time'] = 0
+        user_data[user_id]['ad_clicked'] = False
         await send_ad_step_fixed(update, bot, user_id)
     else:
         await bot.send_message(chat_id=query.message.chat_id, text="🎉 Saari videos complete ho gayi hain!")
@@ -179,19 +196,12 @@ def webhook():
             bot = ExtBot(token=TOKEN)
             update = Update.de_json(update_json, bot)
             
-            # Catching WebApp or normal start events
-            if update.message:
-                # Jab user WebApp (Ad link) open karta hai, toh bot ko automatic message update event receive ho jata hai
-                user_id = int(update.message.from_user.id)
-                if user_id in user_data and user_data[user_id]['click_time'] == 0:
-                    # Jaise hi user ne ad open kiya, backend me hmara timer initialize ho gaya!
-                    user_data[user_id]['click_time'] = time.time()
-                
-                if update.message.text and update.message.text.startswith('/start'):
+            if update.message and update.message.text:
+                if update.message.text.startswith('/start'):
                     asyncio.run(start_with_text(update, bot, update.message.text))
-                    
             elif update.callback_query:
                 asyncio.run(button_callback_fixed(update, bot))
+                
             return "OK", 200
         except Exception as e:
             logging.error(f"Webhook Error: {e}")

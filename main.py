@@ -61,6 +61,7 @@ async def start_with_text(update: Update, bot: ExtBot, text_message: str):
     else:
         return
 
+    # In-memory session setup
     user_data[user_id] = {
         "videos": video_list,
         "channel": target_ch,
@@ -69,13 +70,21 @@ async def start_with_text(update: Update, bot: ExtBot, text_message: str):
         "click_time": 0,
         "ad_clicked": False
     }
-    await send_ad_step_fixed(update, bot, user_id)
+
+    # 🔍 MONGO CHECK: Kya user pehle se verified hai database me?
+    existing_user = users_collection.find_one({"user_id": user_id})
+    
+    if existing_user and existing_user.get("is_verified", False):
+        # Agar MongoDB me data hai, to direct video bypass karke bhej do
+        await process_video_delivery(update, bot, user_id, user, is_callback=False)
+    else:
+        # Agar MongoDB me data nahi hai (Aapne delete kar diya), to ad step dikhao
+        await send_ad_step_fixed(update, bot, user_id)
 
 async def send_ad_step_fixed(update, bot: ExtBot, user_id):
     if user_id not in user_data:
         return
     
-    # FIX: Pehla button ab callback_data trigger karega jisse timer 100% start hoga aur redirect bhi handle hoga
     keyboard = [
         [InlineKeyboardButton("📺 Watch Ad (Start Timer)", callback_data="click_ad")],
         [InlineKeyboardButton("✅ Verify & Get Videos", callback_data="verify_batch")]
@@ -100,15 +109,12 @@ async def button_callback_fixed(update: Update, bot: ExtBot):
         await query.answer("❌ Session expired. Please try again.", show_alert=True)
         return
 
-    # 1. JAB USER WATCH AD PAR CLICK KAREGA
     if query.data == "click_ad":
         user_data[user_id]['click_time'] = time.time()
         user_data[user_id]['ad_clicked'] = True
         
-        # User ko alert dikhayenge aur link par redirect karne ke liye bolenge (Telegram policy secure redirect)
         await query.answer("⏱️ Timer Started! Khulne wale page par 30 seconds rukiye.", show_alert=True)
         
-        # UI update karke directly monetag link open karne ka option url button me convert kar denge
         updated_keyboard = [
             [InlineKeyboardButton("🔗 Open Ad Link Now", url=MONETAG_LINK)],
             [InlineKeyboardButton("✅ Verify & Get Videos", callback_data="verify_batch")]
@@ -119,9 +125,7 @@ async def button_callback_fixed(update: Update, bot: ExtBot):
             pass
         return
 
-    # 2. JAB USER VERIFY BUTTON PAR CLICK KAREGA
     if query.data == "verify_batch":
-        # Check 1: Kya user ne ad button daba kar timer shuru kiya?
         if not user_data[user_id].get('ad_clicked', False):
             await query.answer("❌ Pehle 'Watch Ad (Start Timer)' button par click karein!", show_alert=True)
             return
@@ -129,17 +133,27 @@ async def button_callback_fixed(update: Update, bot: ExtBot):
         click_time = user_data[user_id].get('click_time', 0)
         gap = time.time() - click_time
         
-        # Check 2: Kya 30 seconds poore hue?
         if gap < 30:
             await query.answer(f"❌ Ad verification incomplete! Abhi bhi {int(30 - gap)}s baaki hain.", show_alert=True)
             return
         
-        # Agar dono security check paas ho gaye
-        await query.answer("✅ Verification Successful!")
-        await process_video_delivery(update, bot, user_id, user)
+        # 💾 MONGO SAVE: Verification successful toh DB me save karo
+        users_collection.update_one(
+            {"user_id": user_id},
+            {"$set": {"is_verified": True, "verified_at": datetime.utcnow()}},
+            upsert=True
+        )
 
-async def process_video_delivery(update, bot: ExtBot, user_id, user):
-    query = update.callback_query
+        await query.answer("✅ Verification Successful!")
+        await process_video_delivery(update, bot, user_id, user, is_callback=True)
+
+async def process_video_delivery(update, bot: ExtBot, user_id, user, is_callback=True):
+    # Chat ID handle karne ke liye checks (Message ya Callback dono ke liye)
+    if is_callback:
+        chat_id = update.callback_query.message.chat_id
+    else:
+        chat_id = update.message.chat_id
+
     data = user_data[user_id]
     start_idx = data['current_index']
     end_idx = start_idx + data['batch_size']
@@ -148,13 +162,12 @@ async def process_video_delivery(update, bot: ExtBot, user_id, user):
     videos_sent_successfully = False
     for msg_id in current_batch:
         try:
-            await bot.copy_message(chat_id=query.message.chat_id, from_chat_id=data['channel'], message_id=msg_id)
+            await bot.copy_message(chat_id=chat_id, from_chat_id=data['channel'], message_id=msg_id)
             videos_sent_successfully = True
             await asyncio.sleep(0.5)
         except Exception as e: 
             logging.error(e)
 
-    # LOG CHANNEL LOGIC (Sirf video milne par notification jayega)
     if videos_sent_successfully and LOG_GROUP_ID:
         try:
             first_name = user.first_name or "User"
@@ -173,12 +186,11 @@ async def process_video_delivery(update, bot: ExtBot, user_id, user):
 
     user_data[user_id]['current_index'] = end_idx
     if end_idx < len(data['videos']):
-        # Next batch ke liye reset karenge loop
         user_data[user_id]['click_time'] = 0
         user_data[user_id]['ad_clicked'] = False
         await send_ad_step_fixed(update, bot, user_id)
     else:
-        await bot.send_message(chat_id=query.message.chat_id, text="🎉 Saari videos complete ho gayi hain!")
+        await bot.send_message(chat_id=chat_id, text="🎉 Saari videos complete ho gayi hain!")
         if user_id in user_data:
             del user_data[user_id]
 

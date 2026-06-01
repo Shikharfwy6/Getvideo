@@ -32,6 +32,33 @@ CHANNELS = {
 
 user_data = {}
 
+API_CONFIGS = [
+    {"name": "arolinks", "url": "https://arolinks.com/api?api=f4617908b561110a219cd2b65bc255c2c2c6ff8a&url={url}"},
+    {"name": "vplink", "url": "https://vplink.in/api?api=017ab25e4402465d00047e8e2897f3c6b38afbd9&url={url}"},
+    {"name": "instantlinks", "url": "https://instantlinks.co/api?api=323c4585c0d0b8bc04a170cd57a2e6a74ac6d8aa&url={url}"}
+]
+
+# --- HELPER FUNCTIONS ---
+def check_verification(user_id):
+    user = users_collection.find_one({"_id": int(user_id)})
+    if user:
+        expiry = user.get("expiry")
+        if expiry and datetime.utcnow() < expiry:
+            if user.get("status") == "verify":
+                return True
+    return False
+
+def get_shortlink(url):
+    # Arolinks api se url short karne ke liye function
+    try:
+        api_url = API_CONFIGS[0]["url"].format(url=url)
+        response = requests.get(api_url).json()
+        if response.get("status") == "success":
+            return response.get("shortenedUrl")
+    except Exception as e:
+        logging.error(f"Error generating shortlink: {e}")
+    return url
+
 # --- BOT LOGIC FUNCTIONS ---
 async def start_with_text(update: Update, bot: ExtBot, text_message: str):
     if not update.message:
@@ -46,20 +73,6 @@ async def start_with_text(update: Update, bot: ExtBot, text_message: str):
         await bot.send_message(chat_id=update.message.chat_id, text="👋 Welcome! Bot active hai.")
         return
 
-    # --- MONGODB VERIFICATION CHECK ---
-    # Database me user ko find karein aur check karein ki wo verified hai ya nahi
-    db_user = users_collection.find_one({"user_id": user_id})
-    
-    # Maan rahe hain ki aapke DB me verified users ke liye {"status": "verified"} ya {"verified": True} hoga.
-    # Aap is condition ko apne DB structure ke hisab se badal sakte hain.
-    if not db_user or not db_user.get("verified", False):
-        await bot.send_message(
-            chat_id=update.message.chat_id, 
-            text="❌ **Aap verified nahi hain!** Kripya pehle verify karein."
-        )
-        return
-
-    # Agar user verified hai, toh video processing suru hogi:
     extracted_args = raw_arg.split('_') if "_" in raw_arg else [raw_arg]
     if len(extracted_args) == 2:
         file_id, ch_num = extracted_args
@@ -80,18 +93,37 @@ async def start_with_text(update: Update, bot: ExtBot, text_message: str):
         "batch_size": batch_size,
         "current_index": 0
     }
+
+    # MongoDB me verification status check ho rhi hai
+    is_verified = check_verification(user_id)
     
-    # Monetag step hata kar seedha video deliver kar rahe hain
-    await process_video_delivery(update, bot, user_id, user)
+    if is_verified:
+        # User verified hai -> Direct video send hogi
+        await process_video_delivery(update, bot, user_id, user)
+    else:
+        # User verified nahi hai -> Arolink ka button milega
+        bot_username = (await bot.get_me()).username
+        # Verification complete hone ke baad user isi command par wapas aaye uske liye link generate ho rha hai
+        verification_redirect_url = f"https://t.me/{bot_username}?start={raw_arg}"
+        short_link = get_shortlink(verification_redirect_url)
+
+        keyboard = [
+            [InlineKeyboardButton("🔐 Verify via Arolinks", url=short_link)]
+        ]
+        
+        msg_text = (
+            "⚠️ **Verification Required!**\n\n"
+            "Aap verified nahi hain. Videos paane ke liye niche diye gaye button par click karke verify karein."
+        )
+        await bot.send_message(chat_id=update.message.chat_id, text=msg_text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
 
 async def process_video_delivery(update, bot: ExtBot, user_id, user):
-    # Chat ID nikalne ke liye backup check (message ya callback)
+    if user_id not in user_data:
+        return
+
+    data = user_data[user_id]
     chat_id = update.message.chat_id if update.message else update.callback_query.message.chat_id
     
-    data = user_data.get(user_id)
-    if not data:
-        return
-        
     start_idx = data['current_index']
     end_idx = start_idx + data['batch_size']
     current_batch = data['videos'][start_idx:end_idx]
@@ -123,10 +155,8 @@ async def process_video_delivery(update, bot: ExtBot, user_id, user):
             logging.error(f"Log Channel Error: {log_err}")
 
     user_data[user_id]['current_index'] = end_idx
-    
-    # Agar abhi aur videos baaki hain batch me
     if end_idx < len(data['videos']):
-        # Kisi ad step ke bina seedha agla batch bhejenge
+        # Agar aage aur videos hain toh bina kisi timer ke agla batch bhejega (Kyunki user already verified hai)
         await process_video_delivery(update, bot, user_id, user)
     else:
         await bot.send_message(chat_id=chat_id, text="🎉 Saari videos complete ho gayi hain!")
@@ -146,12 +176,9 @@ def webhook():
             update_json = request.get_json(force=True)
             bot = ExtBot(token=TOKEN)
             update = Update.de_json(update_json, bot)
-            
             if update.message and update.message.text:
                 if update.message.text.startswith('/start'):
                     asyncio.run(start_with_text(update, bot, update.message.text))
-            
-            # Note: Callback query logic hata diya hai kyunki buttons ab use nahi ho rahe hain.
             return "OK", 200
         except Exception as e:
             logging.error(f"Webhook Error: {e}")

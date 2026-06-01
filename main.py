@@ -186,10 +186,10 @@ async def start_with_text(update: Update, bot: ExtBot, text_message: str):
             ]
             
             msg_text = (
-                "⚠️ **Verification Required!**\n\n"
-                f"Aapka verification session expire ho chuka hai ya aap new user hain. "
-                f"Videos pane ke liye neeche diye gaye link se **{api_name}** verify karein. "
-                "Yeh sirf 8 ghante ke liye valid rahega."
+                "⚠️ **⚠️ सत्यापन आवश्यक Verification Required!**\n\n"
+                f"आपका वेरिफिकेशन सेशन समाप्त (expire) हो चुका है या आप एक नए यूजर हैं। "
+                f"अपनी पसंदीदा वीडियो बिना किसी रुकावट के देखने के लिए, कृपया नीचे दिए गए लिंक पर क्लिक करके **{api_name}** सत्यापित (verify) करें। "
+                "वेरीफाई करने के बाद आपको 8 घंटे तक विज्ञापन-मुक्त (ad-free) अनुभव मिलेगा, जिससे आप बिना किसी रुकावट के अपनी वीडियो देख पाएंगे।"
             )
             await bot.send_message(chat_id=chat_id, text=msg_text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
 
